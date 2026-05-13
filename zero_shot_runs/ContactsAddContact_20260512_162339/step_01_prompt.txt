@@ -1,0 +1,78 @@
+You are controlling an Android phone to complete the user's task.
+
+User goal:
+Create a new contact for Emma Muller. Their number is +18344747595.
+
+Current screen:
+You are given a screenshot with red bounding boxes and numeric labels.
+The numeric labels correspond to UI element indexes below.
+
+Visible UI elements:
+UI element 0: resource_name='com.google.android.apps.nexuslauncher:id/workspace', class_name='android.widget.ScrollView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=True, bbox=(0, 0, 1080, 2400)
+UI element 1: content_description='Home', class_name='android.view.View', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(0, 128, 1080, 2337)
+UI element 2: text='Phone', content_description='Phone', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(76, 1873, 249, 2068)
+UI element 3: text='Messages', content_description='Messages', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(328, 1873, 501, 2068)
+UI element 4: text='Chrome', content_description='Chrome', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(580, 1873, 753, 2068)
+UI element 5: text='Gmail', content_description='Predicted app: Gmail', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(832, 1873, 1004, 2068)
+UI element 6: content_description='Search', resource_name='com.google.android.apps.nexuslauncher:id/search_container_hotseat', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(75, 2125, 1004, 2290)
+UI element 7: text='Sun, Oct 15', content_description='Sun, Oct 15', resource_name='com.google.android.apps.nexuslauncher:id/date', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(57, 292, 1023, 354)
+UI element 8: text='Gmail', content_description='Gmail', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(309, 1479, 519, 1751)
+UI element 9: text='Photos', content_description='Photos', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(561, 1479, 771, 1751)
+UI element 10: text='YouTube', content_description='YouTube', class_name='android.widget.TextView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(813, 1479, 1023, 1751)
+UI element 11: content_description='Google app', resource_name='com.google.android.apps.nexuslauncher:id/g_icon', class_name='android.widget.ImageView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(86, 2144, 212, 2270)
+UI element 12: content_description='Voice search', resource_name='com.google.android.apps.nexuslauncher:id/mic_icon', class_name='android.widget.ImageView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(741, 2125, 867, 2290)
+UI element 13: content_description='Google Lens', resource_name='com.google.android.apps.nexuslauncher:id/lens_icon', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(867, 2125, 993, 2290)
+UI element 14: text='15:34', content_description='15:34', resource_name='com.android.systemui:id/clock', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(50, 1, 148, 128)
+UI element 15: content_description='Android System notification: Serial console enabled', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(148, 1, 206, 128)
+UI element 16: content_description='Phone signal full.', resource_name='com.android.systemui:id/mobile_combo', class_name='android.widget.FrameLayout', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(853, 35, 970, 93)
+UI element 17: content_description='Battery 100 percent.', resource_name='com.android.systemui:id/battery', class_name='android.widget.LinearLayout', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(986, 1, 1006, 128)
+UI element 18: content_description='No internet', resource_name='com.android.systemui:id/mobile_type', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(853, 43, 931, 85)
+
+Recent action history:
+No previous action.
+
+You must output exactly ONE JSON object and nothing else.
+
+Allowed actions:
+
+1. Complete the task if the goal is already achieved:
+{"action_type": "status", "goal_status": "complete"}
+
+2. Stop if the task is impossible:
+{"action_type": "status", "goal_status": "infeasible"}
+
+3. Click a visible UI element:
+{"action_type": "click", "index": 12}
+
+4. Long press a visible UI element:
+{"action_type": "long_press", "index": 12}
+
+5. Input text into a visible text field:
+{"action_type": "input_text", "index": 12, "text": "hello", "clear_text": true}
+
+6. Press Enter:
+{"action_type": "keyboard_enter"}
+
+7. Navigate:
+{"action_type": "navigate_back"}
+{"action_type": "navigate_home"}
+
+8. Scroll:
+{"action_type": "scroll", "direction": "down"}
+{"action_type": "scroll", "direction": "up"}
+{"action_type": "scroll", "direction": "left"}
+{"action_type": "scroll", "direction": "right"}
+
+9. Open an app:
+{"action_type": "open_app", "app_name": "Contacts"}
+
+10. Wait:
+{"action_type": "wait"}
+
+Important rules:
+- Use element indexes only from the visible UI element list.
+- Do not invent indexes.
+- Prefer open_app if you need to enter an app.
+- Prefer input_text for typing; do not tap keyboard letters one by one.
+- If an action did not change the screen before, try a different strategy.
+- Output only JSON. No explanation. No markdown.

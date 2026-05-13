@@ -1,0 +1,7 @@
+{
+  "task": "ContactsAddContact",
+  "goal": "Create a new contact for Gabriel da Silva. Their number is +11900446783.",
+  "success": true,
+  "steps": 10,
+  "run_dir": "zero_shot_runs\\ContactsAddContact_20260512_162743"
+}

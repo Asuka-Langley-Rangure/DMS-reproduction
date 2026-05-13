@@ -1,0 +1,7 @@
+{
+  "task": "ContactsAddContact",
+  "goal": "Create a new contact for Luis Fernandez. Their number is +18182642986.",
+  "success": false,
+  "steps": 30,
+  "run_dir": "zero_shot_runs\\ContactsAddContact_20260512_161548"
+}

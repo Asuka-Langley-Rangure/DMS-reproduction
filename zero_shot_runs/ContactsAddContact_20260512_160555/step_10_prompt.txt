@@ -1,0 +1,122 @@
+You are controlling an Android phone to complete the user's task.
+
+User goal:
+Create a new contact for Fatima Pereira. Their number is +19938027404.
+
+Current screen:
+You are given a screenshot with red bounding boxes and numeric labels.
+The numeric labels correspond to UI element indexes below.
+
+Visible UI elements:
+UI element 0: content_description='Cancel', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(0, 138, 147, 285)
+UI element 1: text='Create contact', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(157, 175, 551, 248)
+UI element 2: text='Save', resource_name='com.google.android.contacts:id/toolbar_button', class_name='android.widget.Button', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(723, 148, 954, 274)
+UI element 3: content_description='More options', class_name='android.widget.ImageView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(954, 148, 1080, 274)
+UI element 4: resource_name='com.google.android.contacts:id/contact_editor_scroller', class_name='android.widget.ScrollView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=True, bbox=(0, 296, 1080, 1517)
+UI element 5: text='Fatima', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 598, 933, 747)
+UI element 6: text='Pereira', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 783, 933, 932)
+UI element 7: text='Company', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 989, 933, 1138)
+UI element 8: text='+1 993-802-7404', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 1195, 933, 1344)
+UI element 9: text='Mobile', content_description='Mobile Phone', class_name='android.widget.Spinner', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 1380, 586, 1517)
+UI element 10: content_description='Show dropdown menu', resource_name='com.google.android.contacts:id/text_input_end_icon', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(460, 1391, 586, 1517)
+UI element 11: content_description='Delete Mobile Phone', resource_name='com.google.android.contacts:id/delete_button_container', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 1180, 1080, 1327)
+UI element 12: content_description='Add contact photo', resource_name='com.google.android.contacts:id/photo_icon', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(397, 296, 682, 444)
+UI element 13: text='Add photo', resource_name='com.google.android.contacts:id/text_label_photo_icon', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(449, 459, 630, 530)
+UI element 14: content_description='Show more name fields', resource_name='com.google.android.contacts:id/expansion_view', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 583, 1080, 730)
+UI element 15: content_description='delete', resource_name='com.google.android.contacts:id/delete_button', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 1180, 1080, 1327)
+UI element 16: content_description='Back', resource_name='android:id/input_method_nav_back', class_name='android.widget.ImageView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(71, 2274, 254, 2400)
+UI element 17: content_description='Switch input method', resource_name='android:id/input_method_nav_ime_switcher', class_name='android.widget.ImageView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(826, 2274, 1009, 2400)
+UI element 18: content_description='1', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_1', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(5, 1517, 112, 1633)
+UI element 19: content_description='2', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_2', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(112, 1517, 219, 1633)
+UI element 20: content_description='3', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_3', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(219, 1517, 326, 1633)
+UI element 21: content_description='4', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_4', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(326, 1517, 433, 1633)
+UI element 22: content_description='5', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_5', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(433, 1517, 540, 1633)
+UI element 23: content_description='6', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_6', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(540, 1517, 647, 1633)
+UI element 24: content_description='7', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_7', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(647, 1517, 754, 1633)
+UI element 25: content_description='8', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_8', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(754, 1517, 861, 1633)
+UI element 26: content_description='9', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_9', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(861, 1517, 968, 1633)
+UI element 27: content_description='0', resource_name='com.google.android.inputmethod.latin:id/key_pos_password_header_number_0', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(968, 1517, 1075, 1633)
+UI element 28: content_description='q', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_0', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(5, 1654, 112, 1808)
+UI element 29: content_description='w', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_1', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(112, 1654, 219, 1808)
+UI element 30: content_description='e', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_2', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(219, 1654, 326, 1808)
+UI element 31: content_description='r', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_3', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(326, 1654, 433, 1808)
+UI element 32: content_description='t', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_4', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(433, 1654, 540, 1808)
+UI element 33: content_description='y', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_5', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(540, 1654, 647, 1808)
+UI element 34: content_description='u', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_6', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(647, 1654, 754, 1808)
+UI element 35: content_description='i', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_7', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(754, 1654, 861, 1808)
+UI element 36: content_description='o', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_8', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(861, 1654, 968, 1808)
+UI element 37: content_description='p', resource_name='com.google.android.inputmethod.latin:id/key_pos_0_9', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(968, 1654, 1075, 1808)
+UI element 38: content_description='a', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_0', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(5, 1808, 165, 1963)
+UI element 39: content_description='s', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_1', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(165, 1808, 272, 1963)
+UI element 40: content_description='d', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_2', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(272, 1808, 379, 1963)
+UI element 41: content_description='f', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_3', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(379, 1808, 486, 1963)
+UI element 42: content_description='g', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_4', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(486, 1808, 593, 1963)
+UI element 43: content_description='h', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_5', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(593, 1808, 700, 1963)
+UI element 44: content_description='j', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_6', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(700, 1808, 807, 1963)
+UI element 45: content_description='k', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_7', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(807, 1808, 914, 1963)
+UI element 46: content_description='l', resource_name='com.google.android.inputmethod.latin:id/key_pos_1_8', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(914, 1808, 1075, 1963)
+UI element 47: content_description='Shift', resource_name='com.google.android.inputmethod.latin:id/key_pos_shift', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(5, 1963, 165, 2118)
+UI element 48: content_description='z', resource_name='com.google.android.inputmethod.latin:id/key_pos_2_1', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(165, 1963, 272, 2118)
+UI element 49: content_description='x', resource_name='com.google.android.inputmethod.latin:id/key_pos_2_2', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(272, 1963, 379, 2118)
+UI element 50: content_description='c', resource_name='com.google.android.inputmethod.latin:id/key_pos_2_3', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(379, 1963, 486, 2118)
+UI element 51: content_description='v', resource_name='com.google.android.inputmethod.latin:id/key_pos_2_4', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(486, 1963, 593, 2118)
+UI element 52: content_description='b', resource_name='com.google.android.inputmethod.latin:id/key_pos_2_5', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(593, 1963, 700, 2118)
+UI element 53: content_description='n', resource_name='com.google.android.inputmethod.latin:id/key_pos_2_6', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(700, 1963, 807, 2118)
+UI element 54: content_description='m', resource_name='com.google.android.inputmethod.latin:id/key_pos_2_7', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(807, 1963, 914, 2118)
+UI element 55: content_description='Delete', resource_name='com.google.android.inputmethod.latin:id/key_pos_del', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(914, 1963, 1075, 2118)
+UI element 56: content_description='Symbol keyboard', resource_name='com.google.android.inputmethod.latin:id/key_pos_switch_to_symbol', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(5, 2118, 165, 2274)
+UI element 57: content_description=',', resource_name='com.google.android.inputmethod.latin:id/key_pos_bottom_symbol_1', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(165, 2118, 272, 2274)
+UI element 58: content_description='Space', resource_name='com.google.android.inputmethod.latin:id/key_pos_space', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(272, 2118, 807, 2274)
+UI element 59: content_description='.', resource_name='com.google.android.inputmethod.latin:id/key_pos_bottom_symbol_2', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(807, 2118, 914, 2274)
+
+Recent action history:
+Step 6: action={'action_type': 'click', 'index': 6}, success_check=False, note=
+Step 7: action={'action_type': 'input_text', 'index': 6, 'text': 'Pereira'}, success_check=False, note=
+Step 8: action={'action_type': 'click', 'index': 8}, success_check=False, note=
+Step 9: action={'action_type': 'input_text', 'index': 8, 'text': '+19938027404'}, success_check=False, note=
+
+You must output exactly ONE JSON object and nothing else.
+
+Allowed actions:
+
+1. Complete the task if the goal is already achieved:
+{"action_type": "status", "goal_status": "complete"}
+
+2. Stop if the task is impossible:
+{"action_type": "status", "goal_status": "infeasible"}
+
+3. Click a visible UI element:
+{"action_type": "click", "index": 12}
+
+4. Long press a visible UI element:
+{"action_type": "long_press", "index": 12}
+
+5. Input text into a visible text field:
+{"action_type": "input_text", "index": 12, "text": "hello", "clear_text": true}
+
+6. Press Enter:
+{"action_type": "keyboard_enter"}
+
+7. Navigate:
+{"action_type": "navigate_back"}
+{"action_type": "navigate_home"}
+
+8. Scroll:
+{"action_type": "scroll", "direction": "down"}
+{"action_type": "scroll", "direction": "up"}
+{"action_type": "scroll", "direction": "left"}
+{"action_type": "scroll", "direction": "right"}
+
+9. Open an app:
+{"action_type": "open_app", "app_name": "Contacts"}
+
+10. Wait:
+{"action_type": "wait"}
+
+Important rules:
+- Use element indexes only from the visible UI element list.
+- Do not invent indexes.
+- Prefer open_app if you need to enter an app.
+- Prefer input_text for typing; do not tap keyboard letters one by one.
+- If an action did not change the screen before, try a different strategy.
+- Output only JSON. No explanation. No markdown.

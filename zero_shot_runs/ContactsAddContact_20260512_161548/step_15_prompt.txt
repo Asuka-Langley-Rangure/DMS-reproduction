@@ -1,0 +1,89 @@
+You are controlling an Android phone to complete the user's task.
+
+User goal:
+Create a new contact for Luis Fernandez. Their number is +18182642986.
+
+Current screen:
+You are given a screenshot with red bounding boxes and numeric labels.
+The numeric labels correspond to UI element indexes below.
+
+Visible UI elements:
+UI element 0: content_description='Cancel', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(0, 138, 147, 285)
+UI element 1: text='Edit contact', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(157, 175, 472, 248)
+UI element 2: text='Save', resource_name='com.google.android.contacts:id/toolbar_button', class_name='android.widget.Button', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(723, 148, 954, 274)
+UI element 3: content_description='More options', class_name='android.widget.ImageView', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(954, 148, 1080, 274)
+UI element 4: resource_name='com.google.android.contacts:id/contact_editor_scroller', class_name='android.widget.ScrollView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=True, bbox=(0, 296, 1080, 2337)
+UI element 5: text='Luis', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 803, 933, 952)
+UI element 6: text='Fernandez', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 988, 933, 1137)
+UI element 7: text='Company', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 1194, 933, 1343)
+UI element 8: text='4+1', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 1400, 933, 1549)
+UI element 9: text='Mobile', content_description='Mobile Phone', class_name='android.widget.Spinner', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 1585, 586, 1734)
+UI element 10: content_description='Show dropdown menu', resource_name='com.google.android.contacts:id/text_input_end_icon', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(460, 1596, 586, 1722)
+UI element 11: content_description='Delete Mobile Phone', resource_name='com.google.android.contacts:id/delete_button_container', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 1385, 1080, 1532)
+UI element 12: text='48', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 1796, 933, 1945)
+UI element 13: text='Home', content_description='Home Phone', class_name='android.widget.Spinner', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 1981, 586, 2130)
+UI element 14: content_description='Show dropdown menu', resource_name='com.google.android.contacts:id/text_input_end_icon', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(460, 1992, 586, 2118)
+UI element 15: content_description='Delete Home Phone', resource_name='com.google.android.contacts:id/delete_button_container', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 1781, 1080, 1928)
+UI element 16: text='Phone', class_name='android.widget.EditText', is_clickable=True, is_editable=True, is_enabled=True, is_scrollable=False, bbox=(137, 2192, 933, 2337)
+UI element 17: content_description='Add contact photo', resource_name='com.google.android.contacts:id/photo_icon', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(397, 364, 682, 649)
+UI element 18: text='Add photo', resource_name='com.google.android.contacts:id/text_label_photo_icon', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(449, 664, 630, 735)
+UI element 19: content_description='Show more name fields', resource_name='com.google.android.contacts:id/expansion_view', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 788, 1080, 935)
+UI element 20: content_description='delete', resource_name='com.google.android.contacts:id/delete_button', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 1385, 1080, 1532)
+UI element 21: content_description='delete', resource_name='com.google.android.contacts:id/delete_button', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(933, 1781, 1080, 1928)
+UI element 22: text='15:35', content_description='15:35', resource_name='com.android.systemui:id/clock', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(50, 1, 148, 128)
+UI element 23: content_description='Android System notification: Serial console enabled', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(148, 1, 206, 128)
+UI element 24: content_description='Phone signal full.', resource_name='com.android.systemui:id/mobile_combo', class_name='android.widget.FrameLayout', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(853, 35, 970, 93)
+UI element 25: content_description='Battery 100 percent.', resource_name='com.android.systemui:id/battery', class_name='android.widget.LinearLayout', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(986, 1, 1006, 128)
+UI element 26: content_description='No internet', resource_name='com.android.systemui:id/mobile_type', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(853, 43, 931, 85)
+
+Recent action history:
+Step 11: action={'action_type': 'click', 'index': 12}, success_check=False, note=
+Step 12: action={'action_type': 'input_text', 'index': 23, 'text': '8', 'clear_text': False}, success_check=False, note=
+Step 13: action={'action_type': 'click', 'index': 2}, success_check=False, note=
+Step 14: action={'action_type': 'click', 'index': 2}, success_check=False, note=
+
+You must output exactly ONE JSON object and nothing else.
+
+Allowed actions:
+
+1. Complete the task if the goal is already achieved:
+{"action_type": "status", "goal_status": "complete"}
+
+2. Stop if the task is impossible:
+{"action_type": "status", "goal_status": "infeasible"}
+
+3. Click a visible UI element:
+{"action_type": "click", "index": 12}
+
+4. Long press a visible UI element:
+{"action_type": "long_press", "index": 12}
+
+5. Input text into a visible text field:
+{"action_type": "input_text", "index": 12, "text": "hello", "clear_text": true}
+
+6. Press Enter:
+{"action_type": "keyboard_enter"}
+
+7. Navigate:
+{"action_type": "navigate_back"}
+{"action_type": "navigate_home"}
+
+8. Scroll:
+{"action_type": "scroll", "direction": "down"}
+{"action_type": "scroll", "direction": "up"}
+{"action_type": "scroll", "direction": "left"}
+{"action_type": "scroll", "direction": "right"}
+
+9. Open an app:
+{"action_type": "open_app", "app_name": "Contacts"}
+
+10. Wait:
+{"action_type": "wait"}
+
+Important rules:
+- Use element indexes only from the visible UI element list.
+- Do not invent indexes.
+- Prefer open_app if you need to enter an app.
+- Prefer input_text for typing; do not tap keyboard letters one by one.
+- If an action did not change the screen before, try a different strategy.
+- Output only JSON. No explanation. No markdown.

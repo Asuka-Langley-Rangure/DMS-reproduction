@@ -1,0 +1,75 @@
+You are controlling an Android phone to complete the user's task.
+
+User goal:
+Create a new contact for Gabriel da Silva. Their number is +11900446783.
+
+Current screen:
+You are given a screenshot with red bounding boxes and numeric labels.
+The numeric labels correspond to UI element indexes below.
+
+Visible UI elements:
+UI element 0: content_description='Create contact', resource_name='com.google.android.contacts:id/floating_action_button', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(870, 1938, 1017, 2085)
+UI element 1: content_description='Contacts', resource_name='com.google.android.contacts:id/contacts', class_name='android.widget.FrameLayout', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(0, 2127, 360, 2337)
+UI element 2: content_description='Highlights', resource_name='com.google.android.contacts:id/highlights', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(360, 2127, 720, 2337)
+UI element 3: content_description='Fix & manage', resource_name='com.google.android.contacts:id/nav_manage', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(720, 2127, 1080, 2337)
+UI element 4: resource_name='com.google.android.contacts:id/chips_container', class_name='android.widget.HorizontalScrollView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=True, bbox=(0, 299, 1080, 425)
+UI element 5: content_description='Open navigation drawer', class_name='android.widget.ImageButton', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(53, 149, 179, 275)
+UI element 6: content_description='Signed in as Device\nAccount and settings.', resource_name='com.google.android.contacts:id/selected_account_disc', class_name='android.widget.FrameLayout', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(904, 149, 1038, 275)
+UI element 7: text='No contacts yet', resource_name='android:id/text1', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(316, 1478, 765, 1558)
+UI element 8: text='Phone contacts', class_name='android.widget.Button', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(42, 299, 440, 425)
+UI element 9: text='Email contacts', class_name='android.widget.Button', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(461, 299, 841, 425)
+UI element 10: text='Company', class_name='android.widget.Button', is_clickable=True, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(862, 299, 1080, 425)
+UI element 11: text='15:34', content_description='15:34', resource_name='com.android.systemui:id/clock', class_name='android.widget.TextView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(50, 1, 148, 128)
+UI element 12: content_description='Android System notification: Serial console enabled', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(148, 1, 206, 128)
+UI element 13: content_description='Phone signal full.', resource_name='com.android.systemui:id/mobile_combo', class_name='android.widget.FrameLayout', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(853, 35, 970, 93)
+UI element 14: content_description='Battery 100 percent.', resource_name='com.android.systemui:id/battery', class_name='android.widget.LinearLayout', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(986, 1, 1006, 128)
+UI element 15: content_description='No internet', resource_name='com.android.systemui:id/mobile_type', class_name='android.widget.ImageView', is_clickable=False, is_editable=False, is_enabled=True, is_scrollable=False, bbox=(853, 43, 931, 85)
+
+Recent action history:
+Step 1: action={'action_type': 'open_app', 'app_name': 'Contacts'}, success_check=False, note=
+
+You must output exactly ONE JSON object and nothing else.
+
+Allowed actions:
+
+1. Complete the task if the goal is already achieved:
+{"action_type": "status", "goal_status": "complete"}
+
+2. Stop if the task is impossible:
+{"action_type": "status", "goal_status": "infeasible"}
+
+3. Click a visible UI element:
+{"action_type": "click", "index": 12}
+
+4. Long press a visible UI element:
+{"action_type": "long_press", "index": 12}
+
+5. Input text into a visible text field:
+{"action_type": "input_text", "index": 12, "text": "hello", "clear_text": true}
+
+6. Press Enter:
+{"action_type": "keyboard_enter"}
+
+7. Navigate:
+{"action_type": "navigate_back"}
+{"action_type": "navigate_home"}
+
+8. Scroll:
+{"action_type": "scroll", "direction": "down"}
+{"action_type": "scroll", "direction": "up"}
+{"action_type": "scroll", "direction": "left"}
+{"action_type": "scroll", "direction": "right"}
+
+9. Open an app:
+{"action_type": "open_app", "app_name": "Contacts"}
+
+10. Wait:
+{"action_type": "wait"}
+
+Important rules:
+- Use element indexes only from the visible UI element list.
+- Do not invent indexes.
+- Prefer open_app if you need to enter an app.
+- Prefer input_text for typing; do not tap keyboard letters one by one.
+- If an action did not change the screen before, try a different strategy.
+- Output only JSON. No explanation. No markdown.

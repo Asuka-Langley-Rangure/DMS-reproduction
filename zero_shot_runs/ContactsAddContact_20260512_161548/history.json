@@ -1,0 +1,310 @@
+[
+  {
+    "step": 1,
+    "action": {
+      "action_type": "open_app",
+      "app_name": "Contacts"
+    },
+    "raw_output": "{\"action_type\": \"open_app\", \"app_name\": \"Contacts\"}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 2,
+    "action": {
+      "action_type": "click",
+      "index": 1
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 1}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 3,
+    "action": {
+      "action_type": "click",
+      "index": 5
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 5}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 4,
+    "action": {
+      "action_type": "input_text",
+      "index": 5,
+      "text": "Luis",
+      "clear_text": false
+    },
+    "raw_output": "{\"action_type\": \"input_text\", \"index\": 5, \"text\": \"Luis\", \"clear_text\": false}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 5,
+    "action": {
+      "action_type": "click",
+      "index": 6
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 6}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 6,
+    "action": {
+      "action_type": "input_text",
+      "index": 6,
+      "text": "Fernandez",
+      "clear_text": false
+    },
+    "raw_output": "{\"action_type\": \"input_text\", \"index\": 6, \"text\": \"Fernandez\", \"clear_text\": false}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 7,
+    "action": {
+      "action_type": "click",
+      "index": 8
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 8}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 8,
+    "action": {
+      "action_type": "input_text",
+      "index": 20,
+      "text": "+1",
+      "clear_text": false
+    },
+    "raw_output": "{\"action_type\": \"input_text\", \"index\": 20, \"text\": \"+1\", \"clear_text\": false}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 9,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 10,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 11,
+    "action": {
+      "action_type": "click",
+      "index": 12
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 12}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 12,
+    "action": {
+      "action_type": "input_text",
+      "index": 23,
+      "text": "8",
+      "clear_text": false
+    },
+    "raw_output": "{\"action_type\": \"input_text\", \"index\": 23, \"text\": \"8\", \"clear_text\": false}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 13,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 14,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 15,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 16,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 17,
+    "action": {
+      "action_type": "click",
+      "index": 12
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 12}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 18,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 19,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 20,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 21,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 22,
+    "action": {
+      "action_type": "click",
+      "index": 12
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 12}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 23,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 24,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 25,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 26,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 27,
+    "action": {
+      "action_type": "click",
+      "index": 12
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 12}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 28,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 29,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  },
+  {
+    "step": 30,
+    "action": {
+      "action_type": "click",
+      "index": 2
+    },
+    "raw_output": "{\"action_type\": \"click\", \"index\": 2}",
+    "success_check": false,
+    "note": ""
+  }
+]
