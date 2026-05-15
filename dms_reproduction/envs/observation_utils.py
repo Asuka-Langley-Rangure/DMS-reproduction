@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw
@@ -26,6 +27,16 @@ def pil_to_base64_png(image: Image.Image) -> str:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def base64_png_to_bytes(image_b64: str) -> bytes:
+    """Decode a base64 PNG string into raw bytes."""
+    return base64.b64decode(image_b64.encode("utf-8"))
+
+
+def save_base64_png(image_b64: str, path: str | Path) -> None:
+    """Persist a base64 PNG string to disk."""
+    Path(path).write_bytes(base64_png_to_bytes(image_b64))
 
 
 def bbox_to_tuple(bbox: Any) -> tuple[int, int, int, int] | None:

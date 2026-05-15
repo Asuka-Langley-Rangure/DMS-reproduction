@@ -1,20 +1,223 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Protocol
+from dataclasses import asdict, dataclass, field
+import json
+import re
+from typing import Any, Dict, List, Literal, Optional, Protocol
+
+try:
+    from android_world.env import json_action
+except ImportError:  # pragma: no cover - fallback for local package layout
+    from android_world.android_world.env import json_action
+
+
+ActorStatus = Literal[
+    "completed",
+    "infeasible",
+    "step_limit",
+    "parse_error",
+    "execution_error",
+]
+
+SYSTEM_UI_PACKAGE = "com.android.systemui"
 
 
 @dataclass
 class ActorConfig:
     max_history_items: int = 8
+    max_steps: int = 8
+    max_ui_json_chars: int = 12000
+    max_memory_context_chars: int = 6000
     temperature: float = 0.0
+    wait_after_action_seconds: float = 0.0
 
 
 @dataclass
 class ActorRequest:
-    task: str
+    subtask: str
     observation: Dict[str, Any]
     action_history: List[Dict[str, Any]] = field(default_factory=list)
+    memory_context: str = ""
+
+
+@dataclass
+class ActorAction:
+    action_type: str
+
+    def to_payload(self) -> Dict[str, Any]:
+        return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+@dataclass
+class StatusAction(ActorAction):
+    goal_status: Literal["complete", "infeasible"]
+    message: str = ""
+
+    def __init__(self, goal_status: Literal["complete", "infeasible"], message: str = "") -> None:
+        super().__init__("status")
+        self.goal_status = goal_status
+        self.message = message
+
+
+@dataclass
+class AnswerAction(ActorAction):
+    text: str
+
+    def __init__(self, text: str) -> None:
+        super().__init__("answer")
+        self.text = text
+
+
+@dataclass
+class ClickAction(ActorAction):
+    index: int
+
+    def __init__(self, index: int) -> None:
+        super().__init__("click")
+        self.index = index
+
+
+@dataclass
+class LongPressAction(ActorAction):
+    index: int
+
+    def __init__(self, index: int) -> None:
+        super().__init__("long_press")
+        self.index = index
+
+
+@dataclass
+class InputTextAction(ActorAction):
+    index: int
+    text: str
+    clear_text: bool | None = None
+
+    def __init__(self, index: int, text: str, clear_text: bool | None = None) -> None:
+        super().__init__("input_text")
+        self.index = index
+        self.text = text
+        self.clear_text = clear_text
+
+
+@dataclass
+class KeyboardEnterAction(ActorAction):
+    def __init__(self) -> None:
+        super().__init__("keyboard_enter")
+
+
+@dataclass
+class NavigateHomeAction(ActorAction):
+    def __init__(self) -> None:
+        super().__init__("navigate_home")
+
+
+@dataclass
+class NavigateBackAction(ActorAction):
+    def __init__(self) -> None:
+        super().__init__("navigate_back")
+
+
+@dataclass
+class ScrollAction(ActorAction):
+    direction: Literal["up", "down", "left", "right"]
+    index: int | None = None
+
+    def __init__(self, direction: Literal["up", "down", "left", "right"], index: int | None = None) -> None:
+        super().__init__("scroll")
+        self.direction = direction
+        self.index = index
+
+
+@dataclass
+class OpenAppAction(ActorAction):
+    app_name: str
+
+    def __init__(self, app_name: str) -> None:
+        super().__init__("open_app")
+        self.app_name = app_name
+
+
+@dataclass
+class WaitAction(ActorAction):
+    def __init__(self) -> None:
+        super().__init__("wait")
+
+
+@dataclass
+class ActorStepResult:
+    step_id: int
+    reason: str
+    action: ActorAction | None
+    original_action: Dict[str, Any] | None
+    normalized_action: Dict[str, Any] | None
+    action_normalization_applied: bool
+    normalization_reason: str | None
+    corrected_action: Dict[str, Any] | None
+    correction_reason: str | None
+    messages: List[Dict[str, Any]]
+    prompt_text: str
+    raw_response: str
+    parse_error: str | None
+    execution_error: str | None
+    before_observation: Dict[str, Any]
+    after_observation: Dict[str, Any] | None
+    summary: str
+    done: bool
+    done_reason: str | None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "reason": self.reason,
+            "action": self.action.to_payload() if self.action else None,
+            "original_action": self.original_action,
+            "normalized_action": self.normalized_action,
+            "action_normalization_applied": self.action_normalization_applied,
+            "normalization_reason": self.normalization_reason,
+            "corrected_action": self.corrected_action,
+            "correction_reason": self.correction_reason,
+            "messages": self.messages,
+            "prompt_text": self.prompt_text,
+            "raw_response": self.raw_response,
+            "parse_error": self.parse_error,
+            "execution_error": self.execution_error,
+            "before_observation": self.before_observation,
+            "after_observation": self.after_observation,
+            "summary": self.summary,
+            "done": self.done,
+            "done_reason": self.done_reason,
+        }
+
+    def to_history_item(self, subtask: str, status: str, error: str = "") -> Dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "subtask": subtask,
+            "reason": self.reason,
+            "action": self.action.to_payload() if self.action else None,
+            "summary": self.summary,
+            "status": status,
+            "error": error,
+        }
+
+
+@dataclass
+class ActorRunResult:
+    status: ActorStatus
+    steps: List[ActorStepResult] = field(default_factory=list)
+    final_observation: Dict[str, Any] | None = None
+    completion_message: str = ""
+    answer_text: str = ""
+    last_action: Dict[str, Any] | None = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "steps": [step.to_dict() for step in self.steps],
+            "final_observation": self.final_observation,
+            "completion_message": self.completion_message,
+            "answer_text": self.answer_text,
+            "last_action": self.last_action,
+        }
 
 
 class LLMClient(Protocol):
@@ -22,22 +225,814 @@ class LLMClient(Protocol):
         """Generate a raw actor response."""
 
 
+class ObservationAdapter(Protocol):
+    def capture_observation(
+        self,
+        env: Any,
+        goal: str,
+        *,
+        step_id: int = 0,
+        include_screenshots: bool = True,
+    ) -> Dict[str, Any]:
+        """Capture an observation from the environment."""
+
+
 class AndroidActor:
-    """Minimal Android actor scaffold shared by Baseline B and DMS."""
+    """ActorCode-aligned Android subtask executor backed by JSON actions."""
 
     def __init__(self, llm_client: LLMClient, config: Optional[ActorConfig] = None) -> None:
         self.llm_client = llm_client
         self.config = config or ActorConfig()
 
     def build_messages(self, request: ActorRequest) -> List[Dict[str, Any]]:
-        history = request.action_history[-self.config.max_history_items :]
-        history_text = "\n".join(str(item) for item in history) if history else "No previous action."
-        prompt = (
-            "You are controlling an Android phone to complete one subtask.\n\n"
-            f"Subtask:\n{request.task}\n\n"
-            "Current screen:\n"
-            f"Activity: {request.observation.get('current_activity', '')}\n"
-            f"Visible UI elements:\n{request.observation.get('ui_description', 'Not available')}\n\n"
-            f"Recent action history:\n{history_text}\n"
+        return [
+            {"role": "system", "content": self._build_system_prompt()},
+            {"role": "user", "content": self._build_user_content(request)},
+        ]
+
+    @staticmethod
+    def extract_user_text_prompt(messages: List[Dict[str, Any]]) -> str:
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        return str(item.get("text", ""))
+        return ""
+
+    def messages_to_jsonable(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return json.loads(json.dumps(messages, ensure_ascii=False))
+
+    def run_subtask(
+        self,
+        env: Any,
+        request: ActorRequest,
+        observation_adapter: ObservationAdapter,
+    ) -> ActorRunResult:
+        current_observation = request.observation
+        history = list(request.action_history)
+        steps: list[ActorStepResult] = []
+        answer_text = ""
+
+        for step_id in range(self.config.max_steps):
+            step_request = ActorRequest(
+                subtask=request.subtask,
+                observation=current_observation,
+                action_history=history,
+                memory_context=request.memory_context,
+            )
+            messages = self.build_messages(step_request)
+            prompt_text = self.extract_user_text_prompt(messages)
+            messages_jsonable = self.messages_to_jsonable(messages)
+            raw_response = self.llm_client.generate(
+                messages=messages,
+                temperature=self.config.temperature,
+            )
+
+            reason, action_payload = parse_reason_action_output(raw_response)
+            original_action = dict(action_payload) if isinstance(action_payload, dict) else None
+            if action_payload is None:
+                step = ActorStepResult(
+                    step_id=step_id,
+                    reason=reason,
+                    action=None,
+                    original_action=None,
+                    normalized_action=None,
+                    action_normalization_applied=False,
+                    normalization_reason=None,
+                    corrected_action=None,
+                    correction_reason=None,
+                    messages=messages_jsonable,
+                    prompt_text=prompt_text,
+                    raw_response=raw_response,
+                    parse_error="Failed to parse actor action JSON.",
+                    execution_error=None,
+                    before_observation=current_observation,
+                    after_observation=None,
+                    summary=_build_rule_summary(
+                        subtask=request.subtask,
+                        action=None,
+                        reason=reason,
+                        status="parse_error",
+                        error="Failed to parse actor action JSON.",
+                    ),
+                    done=True,
+                    done_reason="parse_error",
+                )
+                steps.append(step)
+                return ActorRunResult(
+                    status="parse_error",
+                    steps=steps,
+                    final_observation=current_observation,
+                    answer_text=answer_text,
+                )
+
+            try:
+                action, normalized_action, normalization_applied, normalization_reason, corrected_action, correction_reason = parse_actor_action(
+                    action_payload,
+                    current_observation,
+                    reason=reason,
+                )
+            except ValueError as exc:
+                step = ActorStepResult(
+                    step_id=step_id,
+                    reason=reason,
+                    action=None,
+                    original_action=original_action,
+                    normalized_action=None,
+                    action_normalization_applied=False,
+                    normalization_reason=None,
+                    corrected_action=None,
+                    correction_reason=None,
+                    messages=messages_jsonable,
+                    prompt_text=prompt_text,
+                    raw_response=raw_response,
+                    parse_error=str(exc),
+                    execution_error=None,
+                    before_observation=current_observation,
+                    after_observation=None,
+                    summary=_build_rule_summary(
+                        subtask=request.subtask,
+                        action=None,
+                        reason=reason,
+                        status="parse_error",
+                        error=str(exc),
+                    ),
+                    done=True,
+                    done_reason="parse_error",
+                )
+                steps.append(step)
+                return ActorRunResult(
+                    status="parse_error",
+                    steps=steps,
+                    final_observation=current_observation,
+                    answer_text=answer_text,
+                )
+
+            done_reason: str | None = None
+            after_observation: Dict[str, Any] | None = None
+            execution_error: str | None = None
+            step_status = "progress"
+
+            if isinstance(action, StatusAction):
+                done_reason = "completed" if action.goal_status == "complete" else "infeasible"
+                step_status = done_reason
+            else:
+                if isinstance(action, AnswerAction):
+                    answer_text = action.text
+                try:
+                    env.execute_action(to_json_action(action))
+                    after_observation = observation_adapter.capture_observation(
+                        env,
+                        request.subtask,
+                        step_id=step_id + 1,
+                        include_screenshots=True,
+                    )
+                    current_observation = after_observation
+                except Exception as exc:  # pylint: disable=broad-except
+                    execution_error = str(exc)
+                    done_reason = "execution_error"
+                    step_status = "execution_error"
+
+            summary = _build_rule_summary(
+                subtask=request.subtask,
+                action=action,
+                reason=reason,
+                status=step_status,
+                error=execution_error or "",
+            )
+            if normalization_applied and normalization_reason:
+                summary += f" Recoverable actor schema mismatch handled locally. {normalization_reason}"
+            if (
+                step_request.observation.get("observation_consistency") == "unstable"
+                and action.action_type in {"wait", "navigate_back"}
+            ):
+                summary += " requires_post_action_consistency_check=true."
+            step = ActorStepResult(
+                step_id=step_id,
+                reason=reason,
+                action=action,
+                original_action=original_action,
+                normalized_action=normalized_action,
+                action_normalization_applied=normalization_applied,
+                normalization_reason=normalization_reason,
+                corrected_action=corrected_action,
+                correction_reason=correction_reason,
+                messages=messages_jsonable,
+                prompt_text=prompt_text,
+                raw_response=raw_response,
+                parse_error=None,
+                execution_error=execution_error,
+                before_observation=step_request.observation,
+                after_observation=after_observation,
+                summary=summary,
+                done=done_reason is not None,
+                done_reason=done_reason,
+            )
+            steps.append(step)
+            history.append(
+                step.to_history_item(
+                    subtask=request.subtask,
+                    status=step_status,
+                    error=execution_error or "",
+                )
+            )
+
+            if done_reason == "completed":
+                return ActorRunResult(
+                    status="completed",
+                    steps=steps,
+                    final_observation=current_observation,
+                    completion_message=action.message if isinstance(action, StatusAction) else "",
+                    answer_text=answer_text,
+                    last_action=action.to_payload(),
+                )
+            if done_reason == "infeasible":
+                return ActorRunResult(
+                    status="infeasible",
+                    steps=steps,
+                    final_observation=current_observation,
+                    completion_message=action.message if isinstance(action, StatusAction) else "",
+                    answer_text=answer_text,
+                    last_action=action.to_payload(),
+                )
+            if done_reason == "execution_error":
+                return ActorRunResult(
+                    status="execution_error",
+                    steps=steps,
+                    final_observation=current_observation,
+                    answer_text=answer_text,
+                    last_action=action.to_payload(),
+                )
+
+        return ActorRunResult(
+            status="step_limit",
+            steps=steps,
+            final_observation=current_observation,
+            answer_text=answer_text,
+            last_action=steps[-1].action.to_payload() if steps and steps[-1].action else None,
         )
-        return [{"role": "user", "content": prompt}]
+
+    def _build_system_prompt(self) -> str:
+        return (
+            "You are an Android Actor executing one GUI subtask at a time.\n\n"
+            "Role:\n"
+            "- You are responsible for executing a single subtask on the current Android device.\n"
+            "- You are not responsible for re-planning the overall task.\n"
+            "- Use the current GUI state, recent execution history, and retrieved memory context to decide the next action.\n\n"
+            "Decision policy:\n"
+            "- Focus on the smallest necessary action that moves the current subtask forward.\n"
+            "- Return status complete only when the current subtask goal itself is achieved.\n"
+            "- Do not mark a navigation or discovery subtask complete just because the app is open.\n"
+            "- Example: opening the Phone app is not the same as reaching the Contacts tab.\n"
+            "- Before choosing an index, verify the exact numbered UI element and its properties.\n"
+            "- If you mention a specific target like Phone or Contacts, the action index must match that exact visible element.\n"
+            "- For text entry, use action_type input_text, not type, enter_text, fill_text, or set_text.\n"
+            "- If the current path is not feasible, end explicitly with infeasible.\n"
+            "- If the observation is unstable, degraded, or only shows system UI, prefer wait or navigate_back over guessing.\n"
+            "- Treat history and memory as decision evidence, not as logs.\n"
+            "- Do not output code snippets or natural-language-only actions.\n\n"
+            "Available actions:\n"
+            '- {"action_type":"status","goal_status":"complete","message":"..."}\n'
+            '- {"action_type":"status","goal_status":"infeasible","message":"..."}\n'
+            '- {"action_type":"answer","text":"..."}\n'
+            '- {"action_type":"click","index":<target_index>}\n'
+            '- {"action_type":"long_press","index":<target_index>}\n'
+            '- {"action_type":"input_text","index":<target_index>,"text":"...","clear_text":true|false}\n'
+            '- {"action_type":"keyboard_enter"}\n'
+            '- {"action_type":"navigate_home"}\n'
+            '- {"action_type":"navigate_back"}\n'
+            '- {"action_type":"scroll","direction":"up|down|left|right","index":<optional_target_index>}\n'
+            '- {"action_type":"open_app","app_name":"..."}\n'
+            '- {"action_type":"wait"}\n\n'
+            "Output format:\n"
+            "Reason: <brief rationale>\n"
+            'Action: {"action_type":"..."}\n'
+            "Return exactly one action per turn."
+        )
+
+    def _build_user_content(self, request: ActorRequest) -> List[Dict[str, Any]]:
+        prompt = self._build_user_prompt(request)
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        labeled_screenshot_b64 = request.observation.get("labeled_screenshot_b64")
+        screenshot_b64 = request.observation.get("screenshot_b64")
+        image_b64 = labeled_screenshot_b64 or screenshot_b64
+        if image_b64:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                }
+            )
+        return content
+
+    def _build_user_prompt(self, request: ActorRequest) -> str:
+        observation = request.observation
+        foreground_package = observation.get("foreground_package") or "Unknown"
+        dominant_ui_package = observation.get("app_name") or "Unknown"
+        observation_warning = observation.get("observation_warning")
+        observation_consistency = observation.get("observation_consistency") or "stable"
+        return (
+            f"Subtask:\n{request.subtask}\n\n"
+            "Current screen state:\n"
+            f"- Foreground package: {foreground_package}\n"
+            f"- Dominant visible UI package: {dominant_ui_package}\n"
+            f"- Current activity: {observation.get('current_activity') or 'Unknown'}\n"
+            f"- Screen size: {json.dumps(observation.get('screen_size') or {}, ensure_ascii=False)}\n"
+            f"- Visible UI count: {observation.get('visible_ui_count', 0)}\n"
+            f"- Clickable UI count: {observation.get('clickable_ui_count', 0)}\n"
+            f"- Non-system UI count: {observation.get('non_system_ui_count', 0)}\n"
+            f"- Observation consistency: {observation_consistency}\n"
+            "- You are given the labeled screenshot in this message.\n\n"
+            f"Observation warning:\n{observation_warning or 'None'}\n\n"
+            f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
+            f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
+            f"Visible UI elements JSON:\n{self._format_ui_json(observation.get('ui_elements') or [])}\n\n"
+            f"Recent action history:\n{self._format_history(request.action_history)}\n\n"
+            "Retrieved memory context:\n"
+            f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
+            "Decision policy:\n"
+            "- Execute this subtask step by step using one valid GUI action.\n"
+            "- Base the choice on the current GUI state, history, and memory.\n"
+            "- Prefer the smallest necessary action that advances the subtask.\n"
+            "- Use status complete only when the Goal in the current subtask is satisfied.\n"
+            "- Do not use status complete for navigation subtasks solely because the app is already open.\n"
+            "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
+            "- If the target is Phone and [#2] is the Phone element, use index 2, not a nearby container.\n"
+            "- If the observation warning indicates degraded UI, avoid assuming the goal is complete.\n"
+            "- If observation consistency is unstable, prefer wait or navigate_back rather than blind taps.\n"
+            "- If the current path is blocked or not feasible, use status infeasible.\n"
+            "- Return exactly one action in the required JSON action format.\n"
+        )
+
+    def _format_history(self, action_history: List[Dict[str, Any]]) -> str:
+        if not action_history:
+            return "No previous action."
+        stable_lines: list[str] = []
+        warning_lines: list[str] = []
+        lines: list[str] = []
+        recent_items = action_history[-self.config.max_history_items :]
+        invalid_click_counts: dict[int, int] = {}
+        for item in recent_items:
+            action = item.get("action") or {}
+            error = str(item.get("error") or "")
+            if action.get("action_type") in {"click", "long_press"} and "non-clickable" in error.lower():
+                index = int(action.get("index", -1))
+                invalid_click_counts[index] = invalid_click_counts.get(index, 0) + 1
+
+        for index, item in enumerate(recent_items, start=1):
+            action = item.get("action") or {}
+            action_label = json.dumps(action, ensure_ascii=False) if action else "None"
+            error = str(item.get("error") or "").strip() or "None"
+            extras: list[str] = []
+            if action.get("action_type") in {"click", "long_press"} and int(action.get("index", -1)) in invalid_click_counts:
+                if invalid_click_counts[int(action.get("index", -1))] > 1:
+                    extras.append("Repeated invalid click on non-clickable element.")
+            if item.get("summary"):
+                extras.append(str(item.get("summary")))
+            line = (
+                f"{index}. subtask={item.get('subtask', '')}\n"
+                f"   action={action_label}\n"
+                f"   status={item.get('status', '')}\n"
+                f"   reason={item.get('reason', '') or 'None'}\n"
+                f"   error={error}"
+            )
+            if extras:
+                line += f"\n   notes={' | '.join(extras)}"
+            if item.get("observation_unreliable_context") or item.get("status") == "warning":
+                warning_lines.append(line)
+            else:
+                stable_lines.append(line)
+        if stable_lines:
+            lines.append("Stable progress history:")
+            lines.extend(stable_lines)
+        if warning_lines:
+            lines.append("Unstable warning history:")
+            lines.extend(warning_lines)
+        return "\n".join(lines)
+
+    def _format_ui_json(self, ui_elements: List[Dict[str, Any]]) -> str:
+        serialized = json.dumps(ui_elements, ensure_ascii=False, indent=2)
+        return self._truncate(serialized, self.config.max_ui_json_chars)
+
+    @staticmethod
+    def _format_ui_index_table(ui_elements: List[Dict[str, Any]]) -> str:
+        if not ui_elements:
+            return "No visible UI elements available."
+        lines: list[str] = []
+        for element in ui_elements:
+            label = element.get("text") or element.get("content_description") or element.get("resource_name") or "None"
+            lines.append(
+                f"[#{element.get('index')}] label={label!r}; "
+                f"clickable={bool(element.get('is_clickable'))}; "
+                f"editable={bool(element.get('is_editable'))}; "
+                f"package={element.get('package_name') or 'Unknown'}; "
+                f"class={element.get('class_name') or 'Unknown'}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _truncate(text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 20] + "\n...[truncated]"
+
+
+def parse_reason_action_output(raw_response: str) -> tuple[str, dict[str, Any] | None]:
+    reason = ""
+    reason_match = re.search(r"Reason\s*:\s*(.+?)(?:\nAction\s*:|$)", raw_response, flags=re.DOTALL | re.IGNORECASE)
+    if reason_match:
+        reason = reason_match.group(1).strip()
+
+    action_match = re.search(r"Action\s*:\s*(.+)$", raw_response, flags=re.DOTALL | re.IGNORECASE)
+    if action_match:
+        payload = extract_json_object(action_match.group(1).strip())
+        return reason, payload
+
+    payload = extract_json_object(raw_response)
+    return reason, payload
+
+
+def parse_actor_action(
+    payload: dict[str, Any],
+    observation: Dict[str, Any],
+    *,
+    reason: str = "",
+) -> tuple[ActorAction, Dict[str, Any] | None, bool, str | None, Dict[str, Any] | None, str | None]:
+    normalized_payload, normalization_applied, normalization_reason = normalize_actor_action_payload(payload)
+    action_type = str(normalized_payload.get("action_type", "")).strip()
+    valid_indices = set(observation.get("valid_ui_indices") or [])
+    ui_elements_by_index = {
+        int(element.get("index")): element for element in (observation.get("ui_elements") or []) if element.get("index") is not None
+    }
+    observation_warning = str(observation.get("observation_warning") or "")
+
+    if action_type == "status":
+        goal_status = str(normalized_payload.get("goal_status", "")).strip()
+        if goal_status not in {"complete", "infeasible"}:
+            raise ValueError("status.goal_status must be 'complete' or 'infeasible'.")
+        if goal_status == "complete" and _observation_is_degraded(observation_warning, observation):
+            raise ValueError(
+                "status.complete is not allowed when the observation is degraded or only system UI is visible."
+            )
+        return (
+            StatusAction(goal_status=goal_status, message=str(normalized_payload.get("message", "")).strip()),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    if action_type == "answer":
+        text = str(normalized_payload.get("text", "")).strip()
+        if not text:
+            raise ValueError("answer.text must be non-empty.")
+        return (
+            AnswerAction(text=text),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    if action_type == "click":
+        corrected = _maybe_correct_index_payload(
+            normalized_payload,
+            observation=observation,
+            reason=reason,
+            require_clickable=True,
+        )
+        final_payload = corrected or normalized_payload
+        return (
+            ClickAction(index=_validate_index(final_payload, valid_indices, ui_elements_by_index, "click", require_clickable=True)),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            corrected,
+            "Corrected click target from reasoning-grounded unique UI match." if corrected else None,
+        )
+    if action_type == "long_press":
+        corrected = _maybe_correct_index_payload(
+            normalized_payload,
+            observation=observation,
+            reason=reason,
+            require_clickable=True,
+        )
+        final_payload = corrected or normalized_payload
+        return (
+            LongPressAction(index=_validate_index(final_payload, valid_indices, ui_elements_by_index, "long_press", require_clickable=True)),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            corrected,
+            "Corrected long_press target from reasoning-grounded unique UI match." if corrected else None,
+        )
+    if action_type == "input_text":
+        text = str(normalized_payload.get("text", "")).strip()
+        if not text:
+            raise ValueError("input_text.text must be non-empty.")
+        clear_text = normalized_payload.get("clear_text")
+        if clear_text is not None:
+            clear_text = bool(clear_text)
+        corrected = _maybe_correct_index_payload(
+            normalized_payload,
+            observation=observation,
+            reason=reason,
+            require_editable=True,
+        )
+        final_payload = corrected or normalized_payload
+        return InputTextAction(
+            index=_validate_index(
+                final_payload,
+                valid_indices,
+                ui_elements_by_index,
+                "input_text",
+                require_editable=True,
+            ),
+            text=text,
+            clear_text=clear_text,
+        ), (
+            normalized_payload if normalization_applied else None
+        ), normalization_applied, normalization_reason, corrected, (
+            "Corrected input_text target from reasoning-grounded unique UI match." if corrected else None
+        )
+    if action_type == "keyboard_enter":
+        return (
+            KeyboardEnterAction(),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    if action_type == "navigate_home":
+        return (
+            NavigateHomeAction(),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    if action_type == "navigate_back":
+        return (
+            NavigateBackAction(),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    if action_type == "scroll":
+        direction = str(normalized_payload.get("direction", "")).strip()
+        if direction not in {"up", "down", "left", "right"}:
+            raise ValueError("scroll.direction must be one of up/down/left/right.")
+        index = normalized_payload.get("index")
+        if index is not None:
+            index = _validate_index(normalized_payload, valid_indices, ui_elements_by_index, "scroll")
+        return (
+            ScrollAction(direction=direction, index=index),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    if action_type == "open_app":
+        app_name = str(normalized_payload.get("app_name", "")).strip()
+        if not app_name:
+            raise ValueError("open_app.app_name must be non-empty.")
+        return (
+            OpenAppAction(app_name=app_name),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    if action_type == "wait":
+        return (
+            WaitAction(),
+            normalized_payload if normalization_applied else None,
+            normalization_applied,
+            normalization_reason,
+            None,
+            None,
+        )
+    raise ValueError(f"Unsupported actor action type: {action_type!r}")
+
+
+def normalize_actor_action_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, str | None]:
+    normalized = dict(payload)
+    action_type = str(normalized.get("action_type", "")).strip()
+    alias_map = {
+        "type": "input_text",
+        "enter_text": "input_text",
+        "fill_text": "input_text",
+        "set_text": "input_text",
+    }
+    canonical_action = alias_map.get(action_type)
+    if canonical_action is None:
+        return normalized, False, None
+    normalized["action_type"] = canonical_action
+    return normalized, True, f"Normalized action_type from {action_type!r} to {canonical_action!r}."
+
+
+def _validate_index(
+    payload: dict[str, Any],
+    valid_indices: set[int],
+    ui_elements_by_index: dict[int, dict[str, Any]],
+    action_name: str,
+    *,
+    require_clickable: bool = False,
+    require_editable: bool = False,
+) -> int:
+    if "index" not in payload:
+        raise ValueError(f"{action_name}.index is required.")
+    try:
+        index = int(payload["index"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{action_name}.index must be an integer.") from exc
+    if index not in valid_indices:
+        raise ValueError(f"{action_name}.index must be one of the current valid_ui_indices.")
+    element = ui_elements_by_index.get(index) or {}
+    if require_clickable and not bool(element.get("is_clickable")):
+        raise ValueError(f"{action_name}.index must point to a clickable UI element; non-clickable element selected.")
+    if require_editable and not bool(element.get("is_editable")):
+        raise ValueError(f"{action_name}.index must point to an editable UI element; non-editable element selected.")
+    return index
+
+
+def _observation_is_degraded(observation_warning: str, observation: Dict[str, Any]) -> bool:
+    if observation.get("observation_consistency") == "unstable":
+        return True
+    if observation.get("non_system_ui_count", 0) == 0 and (observation.get("foreground_package") or "") != SYSTEM_UI_PACKAGE:
+        return True
+    return bool(observation_warning)
+
+
+def _maybe_correct_index_payload(
+    payload: dict[str, Any],
+    *,
+    observation: Dict[str, Any],
+    reason: str,
+    require_clickable: bool = False,
+    require_editable: bool = False,
+) -> Dict[str, Any] | None:
+    if "index" not in payload:
+        return None
+    candidate = dict(payload)
+    try:
+        parsed_index = int(candidate["index"])
+    except (TypeError, ValueError):
+        parsed_index = None
+    valid_indices = set(observation.get("valid_ui_indices") or [])
+    ui_elements = observation.get("ui_elements") or []
+    ui_by_index = {
+        int(element.get("index")): element
+        for element in ui_elements
+        if element.get("index") is not None
+    }
+    if parsed_index is not None and parsed_index in valid_indices:
+        target = ui_by_index.get(parsed_index) or {}
+        if not require_clickable or bool(target.get("is_clickable")):
+            if not require_editable or bool(target.get("is_editable")):
+                return None
+
+    target_token = _extract_reason_target(reason)
+    if not target_token:
+        return None
+    matches: list[dict[str, Any]] = []
+    for element in ui_elements:
+        if not _element_matches_token(element, target_token):
+            continue
+        if require_clickable and not bool(element.get("is_clickable")):
+            continue
+        if require_editable and not bool(element.get("is_editable")):
+            continue
+        matches.append(element)
+    if len(matches) != 1:
+        return None
+    candidate["index"] = int(matches[0]["index"])
+    return candidate
+
+
+def _extract_reason_target(reason: str) -> str | None:
+    reason_lower = reason.lower()
+    for token in ("phone", "contacts", "create new contact", "add contact"):
+        if token in reason_lower:
+            return token
+    return None
+
+
+def _element_matches_token(element: dict[str, Any], token: str) -> bool:
+    fields = [
+        str(element.get("text") or "").strip().lower(),
+        str(element.get("content_description") or "").strip().lower(),
+    ]
+    if token in {"create new contact", "add contact"}:
+        return any(value in {"create new contact", "add contact"} or token in value for value in fields)
+    return any(value == token for value in fields)
+
+
+def to_json_action(action: ActorAction) -> json_action.JSONAction:
+    return json_action.JSONAction(**action.to_payload())
+
+
+def extract_json_object(text: str) -> Optional[dict]:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
+    cleaned = re.sub(r"```$", "", cleaned).strip()
+
+    direct_candidates = [cleaned]
+    if cleaned.endswith('"') and cleaned.count("{") and cleaned.count("}"):
+        direct_candidates.append(cleaned[:-1].rstrip())
+
+    for candidate in direct_candidates:
+        parsed = _decode_possible_json(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+
+    balanced = _extract_balanced_json_object(cleaned)
+    if balanced is None:
+        return None
+
+    parsed = _decode_possible_json(balanced)
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _decode_possible_json(candidate: str) -> Any:
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(value, dict):
+        return value
+
+    if isinstance(value, str):
+        try:
+            nested = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(nested, dict):
+            return nested
+
+    return None
+
+
+def _extract_balanced_json_object(text: str) -> Optional[str]:
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _build_rule_summary(
+    *,
+    subtask: str,
+    action: ActorAction | None,
+    reason: str,
+    status: str,
+    error: str,
+) -> str:
+    action_name = action.action_type if action else "no_action"
+    summary = (
+        f"Subtask={subtask}; action={action_name}; status={status}; "
+        f"reason={reason or 'not provided'}."
+    )
+    if error:
+        summary += f" Error={error}."
+    elif status in {"completed", "infeasible"}:
+        summary += " This step ended the subtask."
+    else:
+        summary += " Use this to avoid repeating unproductive paths."
+    return summary

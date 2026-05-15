@@ -34,6 +34,8 @@ class PlannerResult:
     subtasks: List[PlannerSubtask] = field(default_factory=list)
     raw_response: str = ""
     parse_error: Optional[str] = None
+    repaired_parse: bool = False
+    repair_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -42,6 +44,8 @@ class PlannerResult:
             "subtasks": [subtask.to_dict() for subtask in self.subtasks],
             "raw_response": self.raw_response,
             "parse_error": self.parse_error,
+            "repaired_parse": self.repaired_parse,
+            "repair_reason": self.repair_reason,
         }
 
 
@@ -130,12 +134,18 @@ class AndroidTaskPlanner:
 
     def parse_response(self, raw_response: str) -> PlannerResult:
         payload = extract_json_object(raw_response)
+        repaired_parse = False
+        repair_reason: str | None = None
         if payload is None:
-            return PlannerResult(
-                is_goal_complete=False,
-                raw_response=raw_response,
-                parse_error="Failed to parse planner JSON.",
-            )
+            repaired_payload, repair_reason = repair_planner_payload(raw_response)
+            if repaired_payload is None:
+                return PlannerResult(
+                    is_goal_complete=False,
+                    raw_response=raw_response,
+                    parse_error="Failed to parse planner JSON.",
+                )
+            payload = repaired_payload
+            repaired_parse = True
 
         tool = payload.get("tool")
         if tool == "complete_goal":
@@ -143,6 +153,8 @@ class AndroidTaskPlanner:
                 is_goal_complete=True,
                 completion_message=str(payload.get("message", "")).strip(),
                 raw_response=raw_response,
+                repaired_parse=repaired_parse,
+                repair_reason=repair_reason,
             )
 
         if tool not in {"set_tasks", "set_tasks_with_agents"}:
@@ -150,6 +162,8 @@ class AndroidTaskPlanner:
                 is_goal_complete=False,
                 raw_response=raw_response,
                 parse_error=f"Unsupported planner tool: {tool!r}",
+                repaired_parse=repaired_parse,
+                repair_reason=repair_reason,
             )
 
         tasks = payload.get("tasks")
@@ -160,6 +174,8 @@ class AndroidTaskPlanner:
                 is_goal_complete=False,
                 raw_response=raw_response,
                 parse_error="Planner tasks must be a non-empty list.",
+                repaired_parse=repaired_parse,
+                repair_reason=repair_reason,
             )
 
         subtasks: list[PlannerSubtask] = []
@@ -169,6 +185,8 @@ class AndroidTaskPlanner:
                     is_goal_complete=False,
                     raw_response=raw_response,
                     parse_error=f"Planner task at index {index} is not an object.",
+                    repaired_parse=repaired_parse,
+                    repair_reason=repair_reason,
                 )
 
             task_text = item.get("task")
@@ -178,12 +196,16 @@ class AndroidTaskPlanner:
                     is_goal_complete=False,
                     raw_response=raw_response,
                     parse_error=f"Planner task at index {index} is missing 'task'.",
+                    repaired_parse=repaired_parse,
+                    repair_reason=repair_reason,
                 )
             if not isinstance(reason, str) or not reason.strip():
                 return PlannerResult(
                     is_goal_complete=False,
                     raw_response=raw_response,
                     parse_error=f"Planner task at index {index} is missing 'reason'.",
+                    repaired_parse=repaired_parse,
+                    repair_reason=repair_reason,
                 )
 
             parsed = parse_precondition_goal(task_text)
@@ -195,6 +217,8 @@ class AndroidTaskPlanner:
                         f"Planner task at index {index} must use "
                         "'Precondition: ... Goal: ...' format."
                     ),
+                    repaired_parse=repaired_parse,
+                    repair_reason=repair_reason,
                 )
 
             precondition, goal = parsed
@@ -211,6 +235,8 @@ class AndroidTaskPlanner:
             is_goal_complete=False,
             subtasks=subtasks,
             raw_response=raw_response,
+            repaired_parse=repaired_parse,
+            repair_reason=repair_reason,
         )
 
     def _build_system_prompt(self) -> str:
@@ -233,8 +259,19 @@ class AndroidTaskPlanner:
             "- Planning fewer steps at a time improves accuracy because the state can change.\n\n"
             "Step format:\n"
             "- Each step must be a functional goal.\n"
+            "- Each Goal must be one short natural-language description of a small objective.\n"
+            "- Completing each Goal must produce a verifiable UI state change.\n"
+            f"- Each Goal should usually take about 2-6 atomic actions, not one trivial click and not a long multi-stage workflow.\n"
+            "- Do not describe the Goal as a low-level operation such as tap, click, input, type, swipe, scroll, or press unless that action itself is the user's goal.\n"
             "- Use 'Precondition: ... Goal: ...' for every step.\n"
             "- For the first step, use 'Precondition: None. Goal: ...' if needed.\n\n"
+            "Examples:\n"
+            "- Good: 'Open the Phone app.'\n"
+            "- Good: 'Navigate to the contacts section.'\n"
+            "- Good: 'Start creating a new contact.'\n"
+            "- Bad: 'Tap the Phone app icon.'\n"
+            "- Bad: 'Click the Contacts tab.'\n"
+            "- Bad: 'Tap the Create new contact button.'\n\n"
             "Output:\n"
             "If the overall goal is achieved, return only:\n"
             '{"tool":"complete_goal","message":"..."}\n\n'
@@ -307,22 +344,54 @@ class AndroidTaskPlanner:
             f"- If not complete, return the next 1-{self.config.max_subtasks} functional steps.\n"
             "- Every step must use 'Precondition: ... Goal: ...'.\n"
             "- Do not output low-level actions or atomic UI operations.\n"
+            "- Each Goal should be one short natural-language small objective.\n"
+            "- Each Goal should produce a verifiable UI state change after completion.\n"
+            "- Each Goal should usually take around 2-6 atomic actions.\n"
+            "- If the UI already shows an entry point, describe the state to reach, not the tap itself.\n"
+            "- For text-entry subtasks, describe the desired filled state, not actor protocol names like input_text or type.\n"
         )
 
     def _format_task_history(self, task_history: List[Dict[str, Any]]) -> str:
         if not task_history:
             return "No previous subtasks."
 
-        lines: list[str] = []
-        for index, item in enumerate(task_history[-self.config.max_history_items :], start=1):
+        stable_lines: list[str] = []
+        warning_lines: list[str] = []
+        recent_items = self._compress_history_items(task_history[-self.config.max_history_items :])
+        for index, item in enumerate(recent_items, start=1):
             task = str(item.get("task") or item.get("subtask") or "").strip() or "Unknown task"
             status = str(item.get("status") or item.get("result") or "unknown").strip()
             reason = str(item.get("reason") or item.get("note") or "").strip()
             line = f"{index}. task={task}; status={status}"
             if reason:
                 line += f"; reason={reason}"
-            lines.append(line)
+            if item.get("observation_unreliable_context") or status == "warning":
+                warning_lines.append(line)
+            else:
+                stable_lines.append(line)
+        lines: list[str] = []
+        if stable_lines:
+            lines.append("Stable progress history:")
+            lines.extend(stable_lines)
+        if warning_lines:
+            lines.append("Unstable warning history:")
+            lines.extend(warning_lines)
         return "\n".join(lines)
+
+    @staticmethod
+    def _compress_history_items(task_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        compressed: list[Dict[str, Any]] = []
+        for item in task_history:
+            if (
+                compressed
+                and str(item.get("subtask") or item.get("task") or "") == str(compressed[-1].get("subtask") or compressed[-1].get("task") or "")
+                and str(item.get("status") or "") == str(compressed[-1].get("status") or "")
+                and str(item.get("error") or "").lower() == str(compressed[-1].get("error") or "").lower()
+                and "recoverable actor schema mismatch" in str(item.get("summary") or "").lower()
+            ):
+                continue
+            compressed.append(item)
+        return compressed
 
     def _format_ui_json(self, ui_elements: List[Dict[str, Any]]) -> str:
         serialized = json.dumps(ui_elements, ensure_ascii=False, indent=2)
@@ -433,3 +502,34 @@ def parse_precondition_goal(task_text: str) -> tuple[str, str] | None:
     if not precondition or not goal:
         return None
     return precondition, goal
+
+
+def repair_planner_payload(raw_response: str) -> tuple[dict[str, Any] | None, str | None]:
+    cleaned = raw_response.strip()
+    tool_match = re.search(r'"tool"\s*:\s*"([^"]+)"', cleaned)
+    if not tool_match:
+        return None, None
+    tool = tool_match.group(1)
+    if tool not in {"set_tasks", "set_tasks_with_agents", "complete_goal"}:
+        return None, None
+    if tool == "complete_goal":
+        message_match = re.search(r'"message"\s*:\s*"([^"]*)"', cleaned, flags=re.DOTALL)
+        if not message_match:
+            return None, None
+        return {"tool": tool, "message": message_match.group(1)}, "Recovered complete_goal payload from near-JSON output."
+
+    items: list[dict[str, Any]] = []
+    pair_pattern = re.compile(
+        r'"task"\s*:\s*"(?P<task>.+?)(?:"\s*,\s*"reason"\s*:\s*"|;\s*reason"\s*:\s*")(?P<reason>.+?)"',
+        flags=re.DOTALL,
+    )
+    for match in pair_pattern.finditer(cleaned):
+        items.append(
+            {
+                "task": match.group("task").strip(),
+                "reason": match.group("reason").strip(),
+            }
+        )
+    if not items:
+        return None, None
+    return {"tool": tool, "tasks": items}, "Recovered tasks payload from near-JSON output."

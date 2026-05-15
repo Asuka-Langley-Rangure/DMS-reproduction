@@ -152,11 +152,19 @@ class AndroidWorldObservationAdapterTest(unittest.TestCase):
             observation["current_activity"],
             "com.android.contacts/.activities.PeopleActivity",
         )
+        self.assertEqual(observation["foreground_package"], "com.android.contacts")
         self.assertEqual(observation["app_name"], "com.android.contacts")
         self.assertEqual(observation["screen_size"], {"width": 200, "height": 400})
         self.assertEqual(observation["valid_ui_indices"], [0])
+        self.assertEqual(observation["visible_ui_count"], 1)
+        self.assertEqual(observation["clickable_ui_count"], 1)
+        self.assertEqual(observation["non_system_ui_count"], 1)
+        self.assertIsNone(observation["observation_warning"])
+        self.assertEqual(observation["observation_consistency"], "stable")
         self.assertEqual(observation["extra_state"]["step_id"], 3)
         self.assertEqual(observation["extra_state"]["orientation"], 0)
+        self.assertEqual(observation["extra_state"]["observation_attempt"], 1)
+        self.assertFalse(observation["extra_state"]["observation_resampled"])
         self.assertEqual(len(observation["ui_elements"]), 1)
         self.assertEqual(observation["ui_elements"][0]["index"], 0)
         self.assertIn("UI element 0", observation["ui_description"])
@@ -166,6 +174,132 @@ class AndroidWorldObservationAdapterTest(unittest.TestCase):
         labeled = base64.b64decode(observation["labeled_screenshot_b64"])
         self.assertGreater(len(raw), 0)
         self.assertGreater(len(labeled), 0)
+
+    @patch("dms_reproduction.envs.observation_utils.Image.fromarray")
+    @patch("dms_reproduction.envs.android_world_adapter.Image.fromarray")
+    def test_capture_observation_marks_unstable_and_resamples(
+        self,
+        adapter_fromarray,
+        utils_fromarray,
+    ) -> None:
+        adapter_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        utils_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        env = FakeEnv()
+        env.foreground_activity_name = "com.google.android.dialer/.DialtactsActivity"
+        env._state = FakeState(
+            pixels=object(),
+            ui_elements=[
+                FakeUIElement(
+                    text="Phone",
+                    class_name="android.widget.TextView",
+                    bbox_pixels=FakeBBox(10, 20, 110, 60),
+                    is_clickable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.apps.nexuslauncher",
+                ),
+            ],
+        )
+        adapter = AndroidWorldObservationAdapter(max_ui_elements=50, max_resample_attempts=1, resample_delay_seconds=0.0)
+
+        observation = adapter.capture_observation(
+            env,
+            goal="Add a contact",
+            step_id=1,
+            include_screenshots=True,
+        )
+
+        self.assertEqual(observation["observation_consistency"], "unstable")
+        self.assertIn("launcher-dominated", observation["observation_warning"])
+        self.assertEqual(observation["extra_state"]["observation_attempt"], 2)
+        self.assertTrue(observation["extra_state"]["observation_resampled"])
+
+    @patch("dms_reproduction.envs.observation_utils.Image.fromarray")
+    @patch("dms_reproduction.envs.android_world_adapter.Image.fromarray")
+    def test_capture_observation_marks_system_ui_only_as_unstable(
+        self,
+        adapter_fromarray,
+        utils_fromarray,
+    ) -> None:
+        adapter_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        utils_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        env = FakeEnv()
+        env.foreground_activity_name = "com.google.android.contacts/.activities.ContactEditorActivity"
+        env._state = FakeState(
+            pixels=object(),
+            ui_elements=[
+                FakeUIElement(
+                    text=None,
+                    content_description="Battery",
+                    class_name="android.widget.TextView",
+                    bbox_pixels=FakeBBox(10, 20, 110, 60),
+                    is_clickable=False,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.android.systemui",
+                ),
+            ],
+        )
+        adapter = AndroidWorldObservationAdapter(max_ui_elements=50, max_resample_attempts=0, resample_delay_seconds=0.0)
+
+        observation = adapter.capture_observation(
+            env,
+            goal="Add a contact",
+            step_id=1,
+            include_screenshots=True,
+        )
+
+        self.assertEqual(observation["observation_consistency"], "unstable")
+        self.assertIn("system-ui-visible", " ".join(observation["unstable_reasons"]))
+
+    @patch("dms_reproduction.envs.observation_utils.Image.fromarray")
+    @patch("dms_reproduction.envs.android_world_adapter.Image.fromarray")
+    def test_capture_observation_marks_keyboard_active_context_without_unstable_warning(
+        self,
+        adapter_fromarray,
+        utils_fromarray,
+    ) -> None:
+        adapter_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        utils_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        env = FakeEnv()
+        env.foreground_activity_name = "com.google.android.contacts/.activities.ContactEditorActivity"
+        env._state = FakeState(
+            pixels=object(),
+            ui_elements=[
+                FakeUIElement(
+                    text="First name",
+                    content_description="First name",
+                    class_name="android.widget.EditText",
+                    bbox_pixels=FakeBBox(10, 20, 110, 60),
+                    is_clickable=True,
+                    is_editable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.contacts",
+                ),
+                FakeUIElement(
+                    text="q",
+                    class_name="android.widget.Button",
+                    bbox_pixels=FakeBBox(10, 200, 40, 240),
+                    is_clickable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.inputmethod.latin",
+                ),
+            ],
+        )
+        adapter = AndroidWorldObservationAdapter(max_ui_elements=50, max_resample_attempts=0, resample_delay_seconds=0.0)
+
+        observation = adapter.capture_observation(
+            env,
+            goal="Add a contact",
+            step_id=1,
+            include_screenshots=True,
+        )
+
+        self.assertTrue(observation["keyboard_active_context"])
+        self.assertEqual(observation["observation_consistency"], "stable")
+        self.assertIn("Soft keyboard is active", observation["observation_warning"] or "")
 
 
 if __name__ == "__main__":

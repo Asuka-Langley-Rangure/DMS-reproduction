@@ -74,6 +74,10 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertIn("Retrieved memory context", user_prompt)
         self.assertIn("1-5 functional steps", user_prompt)
         self.assertIn("Precondition: ... Goal: ...", system_prompt)
+        self.assertIn("one short natural-language description of a small objective", system_prompt)
+        self.assertIn("verifiable UI state change", system_prompt)
+        self.assertIn("2-6 atomic actions", system_prompt)
+        self.assertIn("Bad: 'Tap the Phone app icon.'", system_prompt)
         self.assertNotIn("Available Specialized Agents", system_prompt)
         image_items = extract_image_items(llm.messages)
         self.assertEqual(len(image_items), 1)
@@ -148,6 +152,17 @@ class PlannerParsingTest(unittest.TestCase):
             parse_precondition_goal("Precondition: None Goal: Open Contacts"),
             ("None", "Open Contacts"),
         )
+
+    def test_parse_response_repairs_near_json_task_reason_boundary(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","tasks":[{"task":"Precondition: The user wants to create a new contact.; '
+            'Goal: Tap on the Create new contact button.; reason":"The Create new contact button is visible."}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIsNone(result.parse_error)
+        self.assertTrue(result.repaired_parse)
+        self.assertEqual(len(result.subtasks), 1)
+        self.assertIn("Tap on the Create new contact button.", result.subtasks[0].goal)
 
 
 if __name__ == "__main__":
