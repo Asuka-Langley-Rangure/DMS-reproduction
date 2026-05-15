@@ -1,0 +1,24 @@
+{
+  "task": "ContactsAddContact",
+  "model": "qwen2.5-vl-7b",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "api_key_present": true,
+  "ssh_password_present": true,
+  "console_port": 5554,
+  "grpc_port": 8554,
+  "output_dir": "planner_smoke_runs\\ContactsAddContact_20260514_180214",
+  "timestamp": "2026-05-14T18:02:14.045452",
+  "tunnel_reused": true,
+  "tunnel_started_by_script": false,
+  "planner_call_seconds": null,
+  "healthcheck_url": "http://127.0.0.1:8000/v1/models",
+  "ssh_command": [
+    "ssh",
+    "-N",
+    "-L",
+    "8000:127.0.0.1:8007",
+    "chencen@114.212.165.149"
+  ],
+  "tunnel_mode": "reused",
+  "error": "Exception caught in simulator. Please see the simulator logs above for more details."
+}

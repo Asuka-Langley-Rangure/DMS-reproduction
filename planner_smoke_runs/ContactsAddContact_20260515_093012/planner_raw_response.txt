@@ -1,0 +1,1 @@
+{"tool":"set_tasks","tasks":[{"task":"Precondition: None. Goal: Open the Phone app.", "reason":"To access the contacts list where we can add a new contact."}]}"

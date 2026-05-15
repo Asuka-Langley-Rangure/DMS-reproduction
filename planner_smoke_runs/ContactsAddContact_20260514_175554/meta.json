@@ -1,0 +1,22 @@
+{
+  "task": "ContactsAddContact",
+  "model": "qwen2.5-vl-7b",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "api_key_present": true,
+  "console_port": 5554,
+  "grpc_port": 8554,
+  "output_dir": "planner_smoke_runs\\ContactsAddContact_20260514_175554",
+  "timestamp": "2026-05-14T17:55:54.647255",
+  "tunnel_reused": false,
+  "tunnel_started_by_script": true,
+  "planner_call_seconds": null,
+  "healthcheck_url": "http://127.0.0.1:8000/v1/models",
+  "ssh_command": [
+    "ssh",
+    "-N",
+    "-L",
+    "8000:127.0.0.1:8007",
+    "chencen@114.212.165.149"
+  ],
+  "error": "Timed out waiting for model endpoint after starting SSH tunnel. Last healthcheck result: connection_error. Command: ssh -N -L 8000:127.0.0.1:8007 chencen@114.212.165.149"
+}

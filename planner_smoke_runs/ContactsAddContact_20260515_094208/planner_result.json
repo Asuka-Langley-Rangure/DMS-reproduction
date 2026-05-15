@@ -1,0 +1,14 @@
+{
+  "is_goal_complete": false,
+  "completion_message": "",
+  "subtasks": [
+    {
+      "precondition": "None.",
+      "goal": "Open the Phone app.",
+      "reason": "The user needs to open the Phone app to add a new contact.",
+      "agent": "android_actor"
+    }
+  ],
+  "raw_response": "{\"tool\":\"set_tasks\",\"tasks\":[{\"task\":\"Precondition: None. Goal: Open the Phone app.\", \"reason\":\"The user needs to open the Phone app to add a new contact.\"}]}\"",
+  "parse_error": null
+}
