@@ -1,1 +1,0 @@
-{"action_type": "status", "goal_status": "complete"}

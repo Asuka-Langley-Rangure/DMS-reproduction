@@ -16,7 +16,7 @@ if VENDOR_DIR.exists() and str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
 
 from dms_reproduction.agents.android_actor import ActorConfig, AndroidActor
-from dms_reproduction.agents.planner import AndroidTaskPlanner
+from dms_reproduction.agents.planner import AndroidTaskPlanner, PlannerConfig
 from dms_reproduction.agents.task_runner import AndroidTaskRunner, TaskRunConfig
 from dms_reproduction.envs.android_world_adapter import AndroidWorldObservationAdapter
 from dms_reproduction.envs.observation_utils import save_base64_png
@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--prompt_profile",
+        default="generic_dms",
+        choices=["generic_dms", "legacy_contact_tuned"],
+    )
 
     parser.add_argument("--ssh_host", default="114.212.165.149")
     parser.add_argument("--ssh_user", default="chencen")
@@ -291,6 +296,8 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
         if (round_record.get("planner_parse_repair") or {}).get("repaired_parse"):
             failure_counts["planner_near_json_repaired"] += 1
         for subtask_run in round_record.get("subtask_runs", []):
+            if not isinstance(subtask_run, dict):
+                continue
             success_check = subtask_run.get("subtask_success_check") or {}
             if (subtask_run.get("subtask_success_check") or {}).get("runner_overrode_to_completed"):
                 failure_counts["actor_overshoot_after_goal"] += 1
@@ -529,12 +536,16 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                 timeout=args.timeout,
             )
         )
-        planner = AndroidTaskPlanner(llm_client)
+        planner = AndroidTaskPlanner(
+            llm_client,
+            PlannerConfig(prompt_profile=args.prompt_profile),
+        )
         actor = AndroidActor(
             llm_client,
             ActorConfig(
                 max_steps=args.max_actor_steps,
                 temperature=args.temperature,
+                prompt_profile=args.prompt_profile,
             ),
         )
         adapter = AndroidWorldObservationAdapter(max_ui_elements=args.max_ui_elements)

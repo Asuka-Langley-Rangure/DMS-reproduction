@@ -34,3 +34,4 @@ Current top issues:
 1. `success override` can still end with a degraded `system-ui-only` observation.
 2. planner can still regress to low-level atomic goals near the contact-creation entry point.
 3. planner grounding veto prevents bad actions, but recovery after veto is still weak.
+

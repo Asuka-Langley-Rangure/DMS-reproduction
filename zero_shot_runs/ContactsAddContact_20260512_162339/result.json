@@ -1,7 +1,0 @@
-{
-  "task": "ContactsAddContact",
-  "goal": "Create a new contact for Emma Muller. Their number is +18344747595.",
-  "success": true,
-  "steps": 10,
-  "run_dir": "zero_shot_runs\\ContactsAddContact_20260512_162339"
-}

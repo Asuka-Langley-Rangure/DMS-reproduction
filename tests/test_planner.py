@@ -74,23 +74,47 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertIn("Retrieved memory context", user_prompt)
         self.assertIn("1-5 functional steps", user_prompt)
         self.assertIn("Precondition: ... Goal: ...", system_prompt)
-        self.assertIn("one short natural-language description of a small objective", system_prompt)
-        self.assertIn("verifiable UI state change", system_prompt)
+        self.assertIn("checkable state change after completion", user_prompt)
         self.assertIn("2-6 atomic actions", system_prompt)
-        self.assertIn("Canonical contact-creation milestones", system_prompt)
-        self.assertIn("Reach the contact creation entry point.", system_prompt)
-        self.assertIn("Fill in Mia Garcia and +18856139998 in the contact form.", system_prompt)
-        self.assertIn("Enter the first name 'Mia' into the First name field.", system_prompt)
-        self.assertIn("On a contact editor screen, prefer one subtask that fills the visible contact form section", user_prompt)
-        self.assertIn("If task history says a referenced UI target was absent from the observation", user_prompt)
-        self.assertIn("saved_but_task_check_failed", system_prompt)
-        self.assertIn("saved_with_wrong_identity", user_prompt)
-        self.assertIn("do not output complete_goal", user_prompt)
-        self.assertIn("Bad: 'Tap the Phone app icon.'", system_prompt)
+        self.assertIn("Use task history to avoid repeating failed or no-progress strategies", system_prompt)
+        self.assertIn("If the overall goal is already satisfied, return complete_goal", user_prompt)
+        self.assertNotIn("Canonical contact-creation milestones", system_prompt)
+        self.assertNotIn("Phone app", system_prompt)
+        self.assertNotIn("contacts section", system_prompt)
+        self.assertNotIn("contact creation entry point", system_prompt)
+        self.assertNotIn("saved_but_task_check_failed", system_prompt)
         self.assertNotIn("Available Specialized Agents", system_prompt)
         image_items = extract_image_items(llm.messages)
         self.assertEqual(len(image_items), 1)
         self.assertIn("data:image/png;base64,BBB", image_items[0]["image_url"]["url"])
+
+    def test_legacy_contact_tuned_profile_keeps_contact_specific_prompt(self) -> None:
+        llm = FakeLLMClient(response='{"tool":"complete_goal","message":"done"}')
+        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5, prompt_profile="legacy_contact_tuned"))
+        observation = {
+            "current_activity": "com.android.contacts/.PeopleActivity",
+            "app_name": "com.android.contacts",
+            "screen_size": {"width": 1080, "height": 2400},
+            "ui_elements": [{"index": 0, "text": "Create contact"}],
+            "ui_description": "UI element 0: text='Create contact'",
+            "screenshot_b64": "AAA",
+            "labeled_screenshot_b64": "BBB",
+        }
+
+        planner.plan(
+            user_goal="Add a contact named Alice",
+            observation=observation,
+            task_history=[],
+            memory_context="",
+        )
+
+        system_prompt = llm.messages[0]["content"]
+        user_prompt = extract_user_text(llm.messages)
+        self.assertIn("Canonical contact-creation milestones", system_prompt)
+        self.assertIn("Reach the contact creation entry point.", system_prompt)
+        self.assertIn("Fill in Mia Garcia and +18856139998 in the contact form.", system_prompt)
+        self.assertIn("saved_but_task_check_failed", system_prompt)
+        self.assertIn("On a contact editor screen, prefer one subtask", user_prompt)
 
 
 class PlannerParsingTest(unittest.TestCase):

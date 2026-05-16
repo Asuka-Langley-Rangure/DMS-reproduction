@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Literal, Optional, Protocol
 
 
 @dataclass
@@ -58,6 +58,7 @@ class PlannerConfig:
     max_ui_json_chars: int = 12000
     temperature: float = 0.0
     default_actor_name: str = "android_actor"
+    prompt_profile: Literal["generic_dms", "legacy_contact_tuned"] = "generic_dms"
 
 
 class LLMClient(Protocol):
@@ -240,6 +241,50 @@ class AndroidTaskPlanner:
         )
 
     def _build_system_prompt(self) -> str:
+        if self.config.prompt_profile == "legacy_contact_tuned":
+            return self._build_legacy_system_prompt()
+        return self._build_generic_system_prompt()
+
+    def _build_generic_system_prompt(self) -> str:
+        return (
+            "You are an Android Task Planner. Your job is to create short, "
+            f"functional plans (1-{self.config.max_subtasks} steps) to achieve "
+            "a user's goal on an Android device.\n\n"
+            "Inputs you receive:\n"
+            "1. The user's overall goal.\n"
+            "2. The current device state:\n"
+            "   - A screenshot of the current screen.\n"
+            "   - A labeled screenshot with indexed UI elements.\n"
+            "   - JSON data of visible UI elements.\n"
+            "   - The current visible Android activity.\n"
+            "3. Complete task history for the current session.\n"
+            "4. Optional retrieved memory context from previous trials.\n\n"
+            "Your task:\n"
+            f"- Devise the next 1-{self.config.max_subtasks} functional steps.\n"
+            "- Focus on what to achieve, not how to click or type.\n"
+            "- Plan fewer steps at a time because the device state can change after execution.\n"
+            "- Use task history to avoid repeating failed or no-progress strategies.\n\n"
+            "Step format:\n"
+            "- Each step must be a functional goal.\n"
+            "- Each step should produce a verifiable UI state change or a clearly checkable state.\n"
+            f"- Each step should usually take about 2-6 atomic actions, not one trivial click and not a long multi-stage workflow.\n"
+            "- Use 'Precondition: ... Goal: ...' for every step.\n"
+            "- For the first step, use 'Precondition: None. Goal: ...' if needed.\n"
+            "- Do not describe low-level operations such as tap, click, input, type, swipe, scroll, or press unless the user's goal itself is the operation.\n"
+            "- If a step depends on information discovered earlier, include that information explicitly in the step.\n\n"
+            "Output:\n"
+            "If the overall goal is achieved, return only:\n"
+            '{"tool":"complete_goal","message":"..."}\n\n'
+            "Otherwise return only:\n"
+            '{"tool":"set_tasks","tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
+            "Constraints:\n"
+            "- Return valid JSON only.\n"
+            "- Do not output code.\n"
+            "- Do not output low-level action scripts.\n"
+            "- After the planned steps are executed, you will be called again with the new device state."
+        )
+
+    def _build_legacy_system_prompt(self) -> str:
         return (
             "You are an Android Task Planner. Your job is to create short, "
             f"functional plans (1-{self.config.max_subtasks} steps) to achieve "
@@ -325,6 +370,69 @@ class AndroidTaskPlanner:
         return content
 
     def _build_user_prompt(
+        self,
+        user_goal: str,
+        observation: Dict[str, Any],
+        task_history: List[Dict[str, Any]],
+        memory_context: str,
+    ) -> str:
+        if self.config.prompt_profile == "legacy_contact_tuned":
+            return self._build_legacy_user_prompt(
+                user_goal=user_goal,
+                observation=observation,
+                task_history=task_history,
+                memory_context=memory_context,
+            )
+        return self._build_generic_user_prompt(
+            user_goal=user_goal,
+            observation=observation,
+            task_history=task_history,
+            memory_context=memory_context,
+        )
+
+    def _build_generic_user_prompt(
+        self,
+        user_goal: str,
+        observation: Dict[str, Any],
+        task_history: List[Dict[str, Any]],
+        memory_context: str,
+    ) -> str:
+        current_activity = observation.get("current_activity") or "Unknown"
+        app_name = observation.get("app_name") or "Unknown"
+        screen_size = observation.get("screen_size") or {}
+        ui_elements = observation.get("ui_elements") or []
+        ui_description = observation.get("ui_description") or "No visible UI elements available."
+        ui_json = self._format_ui_json(ui_elements)
+        history_text = self._format_task_history(task_history)
+        memory_text = self._truncate(memory_context.strip(), self.config.max_memory_context_chars)
+
+        return (
+            f"User overall goal:\n{user_goal}\n\n"
+            "Current device state:\n"
+            f"- Current app: {app_name}\n"
+            f"- Current activity: {current_activity}\n"
+            f"- Screen size: {json.dumps(screen_size, ensure_ascii=False)}\n"
+            "- You are given both the raw screenshot and the labeled screenshot in this message.\n\n"
+            f"Visible UI elements summary:\n{ui_description}\n\n"
+            f"Visible UI elements JSON:\n{ui_json}\n\n"
+            f"Complete task history:\n{history_text}\n\n"
+            "Retrieved memory context:\n"
+            f"{memory_text if memory_text else 'None'}\n\n"
+            "Planner instruction:\n"
+            "- Assess whether the overall user goal is already complete.\n"
+            f"- If not complete, return the next 1-{self.config.max_subtasks} functional steps.\n"
+            "- Every step must use 'Precondition: ... Goal: ...'.\n"
+            "- Do not output low-level actions or atomic UI operations.\n"
+            "- Each goal should be a short, functional objective.\n"
+            "- Each goal should produce a checkable state change after completion.\n"
+            "- Use the current screen as the source of truth.\n"
+            "- Use task history to avoid repeating failed or no-progress strategies.\n"
+            "- If the current screen already exposes a useful entry point, describe the next state to reach rather than the literal tap.\n"
+            "- If the screen is unstable, degraded, or ambiguous, prefer a safer recovery or navigation objective instead of assuming success.\n"
+            "- If the overall goal is already satisfied, return complete_goal instead of more steps.\n"
+        )
+
+    def _build_legacy_user_prompt(
         self,
         user_goal: str,
         observation: Dict[str, Any],

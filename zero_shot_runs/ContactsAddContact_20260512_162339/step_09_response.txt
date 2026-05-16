@@ -1,1 +1,0 @@
-{"action_type": "input_text", "index": 8, "text": "+18344747595", "clear_text": false}

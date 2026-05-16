@@ -149,8 +149,8 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("[#0]", user_prompt)
         self.assertIn("Recent action history", user_prompt)
         self.assertIn("Retrieved memory context", user_prompt)
-        self.assertIn("Prefer the smallest necessary action", user_prompt)
-        self.assertIn("Do not use status complete for navigation subtasks solely because the app is already open", user_prompt)
+        self.assertIn("Prefer the smallest action that advances the current subtask", user_prompt)
+        self.assertIn("Do not perform implicit follow-up actions", user_prompt)
         self.assertNotIn("functional steps", user_prompt)
 
     def test_prompt_includes_observation_warning(self) -> None:
@@ -173,7 +173,7 @@ class ActorPromptTest(unittest.TestCase):
 
     def test_prompt_includes_grouped_contact_form_constraints(self) -> None:
         llm = FakeLLMClient(['Reason: fill first name.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
-        actor = AndroidActor(llm)
+        actor = AndroidActor(llm, ActorConfig(prompt_profile="legacy_contact_tuned"))
         observation = build_observation(activity="com.google.android.contacts/.activities.ContactEditorActivity")
         observation["contact_form_context"] = {
             "target_fields": ["first_name", "last_name", "phone"],
@@ -192,6 +192,23 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Only edit those required fields", user_prompt)
         self.assertIn("Do not click Save until every required field matches the expected value", user_prompt)
         self.assertIn("\"first_name\": 5", user_prompt)
+
+    def test_generic_prompt_ignores_contact_form_specific_block(self) -> None:
+        llm = FakeLLMClient(['Reason: fill a field.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
+        actor = AndroidActor(llm)
+        observation = build_observation(activity="com.google.android.contacts/.activities.ContactEditorActivity")
+        observation["contact_form_context"] = {
+            "target_fields": ["first_name", "last_name", "phone"],
+            "expected_fields": {"first_name": "Mia", "last_name": "Fernandez", "phone": "+13268155334"},
+            "current_values": {"first_name": "", "last_name": "", "phone": ""},
+            "remaining_fields": ["first_name", "last_name", "phone"],
+            "required_field_indices": {"first_name": 5, "last_name": 6, "phone": 8},
+        }
+
+        user_prompt = extract_user_text(actor.build_messages(ActorRequest(subtask="Fill a form", observation=observation)))
+        self.assertNotIn("Grouped contact form constraints", user_prompt)
+        self.assertNotIn("Do not click Save", user_prompt)
+        self.assertIn("Do not perform implicit follow-up actions", user_prompt)
 
 
 class ActorActionParsingTest(unittest.TestCase):

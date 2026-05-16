@@ -1,7 +1,0 @@
-{
-  "task": "ContactsAddContact",
-  "goal": "Create a new contact for Noah Ibrahim. Their number is +17342718461.",
-  "success": false,
-  "steps": 10,
-  "run_dir": "zero_shot_runs\\ContactsAddContact_20260512_161025"
-}

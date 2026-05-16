@@ -30,6 +30,7 @@ class ActorConfig:
     max_memory_context_chars: int = 6000
     temperature: float = 0.0
     wait_after_action_seconds: float = 0.0
+    prompt_profile: Literal["generic_dms", "legacy_contact_tuned"] = "generic_dms"
 
 
 @dataclass
@@ -478,6 +479,47 @@ class AndroidActor:
         )
 
     def _build_system_prompt(self) -> str:
+        if self.config.prompt_profile == "legacy_contact_tuned":
+            return self._build_legacy_system_prompt()
+        return self._build_generic_system_prompt()
+
+    def _build_generic_system_prompt(self) -> str:
+        return (
+            "You are an Android Actor executing one GUI subtask at a time.\n\n"
+            "Role:\n"
+            "- You are responsible for executing the current subtask on the device.\n"
+            "- You are not responsible for re-planning the overall task.\n"
+            "- Use the current GUI state, recent execution history, and retrieved memory context to decide the next action.\n\n"
+            "Decision policy:\n"
+            "- Focus on the smallest valid action that advances the current subtask.\n"
+            "- Return status complete only when the current subtask goal itself is satisfied.\n"
+            "- If the subtask precondition is clearly unmet and cannot be repaired within the current step, return infeasible.\n"
+            "- If a previous action failed or produced no progress, do not repeat the same action unchanged.\n"
+            "- If an action triggers a visible UI change, stop and wait for the next observation instead of predicting further screens.\n"
+            "- Prefer exact indexed UI actions when a target is visible in the current observation.\n"
+            "- If the observation is unstable, degraded, or only shows system UI, prefer a cautious recovery action over guessing.\n"
+            "- Treat history and memory as decision evidence, not as logs.\n"
+            "- Do not output code snippets or natural-language-only actions.\n\n"
+            "Available actions:\n"
+            '- {"action_type":"status","goal_status":"complete","message":"..."}\n'
+            '- {"action_type":"status","goal_status":"infeasible","message":"..."}\n'
+            '- {"action_type":"answer","text":"..."}\n'
+            '- {"action_type":"click","index":<target_index>}\n'
+            '- {"action_type":"long_press","index":<target_index>}\n'
+            '- {"action_type":"input_text","index":<target_index>,"text":"...","clear_text":true|false}\n'
+            '- {"action_type":"keyboard_enter"}\n'
+            '- {"action_type":"navigate_home"}\n'
+            '- {"action_type":"navigate_back"}\n'
+            '- {"action_type":"scroll","direction":"up|down|left|right","index":<optional_target_index>}\n'
+            '- {"action_type":"open_app","app_name":"..."}\n'
+            '- {"action_type":"wait"}\n\n'
+            "Output format:\n"
+            "Reason: <brief rationale>\n"
+            'Action: {"action_type":"..."}\n'
+            "Return exactly one action per turn."
+        )
+
+    def _build_legacy_system_prompt(self) -> str:
         return (
             "You are an Android Actor executing one GUI subtask at a time.\n\n"
             "Role:\n"
@@ -532,6 +574,50 @@ class AndroidActor:
         return content
 
     def _build_user_prompt(self, request: ActorRequest) -> str:
+        if self.config.prompt_profile == "legacy_contact_tuned":
+            return self._build_legacy_user_prompt(request)
+        return self._build_generic_user_prompt(request)
+
+    def _build_generic_user_prompt(self, request: ActorRequest) -> str:
+        observation = request.observation
+        foreground_package = observation.get("foreground_package") or "Unknown"
+        dominant_ui_package = observation.get("app_name") or "Unknown"
+        observation_warning = observation.get("observation_warning")
+        observation_consistency = observation.get("observation_consistency") or "stable"
+        return (
+            f"Subtask:\n{request.subtask}\n\n"
+            "Current screen state:\n"
+            f"- Foreground package: {foreground_package}\n"
+            f"- Dominant visible UI package: {dominant_ui_package}\n"
+            f"- Current activity: {observation.get('current_activity') or 'Unknown'}\n"
+            f"- Screen size: {json.dumps(observation.get('screen_size') or {}, ensure_ascii=False)}\n"
+            f"- Visible UI count: {observation.get('visible_ui_count', 0)}\n"
+            f"- Clickable UI count: {observation.get('clickable_ui_count', 0)}\n"
+            f"- Non-system UI count: {observation.get('non_system_ui_count', 0)}\n"
+            f"- Observation consistency: {observation_consistency}\n"
+            "- You are given the labeled screenshot in this message.\n\n"
+            f"Observation warning:\n{observation_warning or 'None'}\n\n"
+            f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
+            f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
+            f"Visible UI elements JSON:\n{self._format_ui_json(observation.get('ui_elements') or [])}\n\n"
+            f"Recent action history:\n{self._format_history(request.action_history)}\n\n"
+            "Retrieved memory context:\n"
+            f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
+            "Decision policy:\n"
+            "- Execute exactly one valid GUI action.\n"
+            "- Base the choice on the current GUI state, history, and memory.\n"
+            "- Prefer the smallest action that advances the current subtask.\n"
+            "- Use status complete only when the current subtask goal is satisfied.\n"
+            "- Do not perform implicit follow-up actions that are not required by the current subtask.\n"
+            "- If a previous action failed or produced no progress, do not repeat it unchanged.\n"
+            "- If an action causes a visible UI change, stop rather than predicting the next screen.\n"
+            "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
+            "- If the observation is degraded or unstable, prefer a cautious recovery action over guessing.\n"
+            "- If the current path is blocked or not feasible, use status infeasible.\n"
+            "- Return exactly one action in the required JSON action format.\n"
+        )
+
+    def _build_legacy_user_prompt(self, request: ActorRequest) -> str:
         observation = request.observation
         foreground_package = observation.get("foreground_package") or "Unknown"
         dominant_ui_package = observation.get("app_name") or "Unknown"

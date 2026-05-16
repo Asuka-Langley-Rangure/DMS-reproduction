@@ -636,7 +636,7 @@ def main():
         description="Zero-shot VLM baseline for AndroidWorld without default Agent or DMS memory."
     )
 
-    parser.add_argument("--task", default="ContactsAddContact")
+    parser.add_argument("--task", default="ContactsNewContactDraft")
     parser.add_argument("--max_steps", type=int, default=20)
 
     parser.add_argument("--console_port", type=int, default=5554)
