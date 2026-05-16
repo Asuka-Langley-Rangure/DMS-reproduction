@@ -264,14 +264,27 @@ class AndroidTaskPlanner:
             f"- Each Goal should usually take about 2-6 atomic actions, not one trivial click and not a long multi-stage workflow.\n"
             "- Do not describe the Goal as a low-level operation such as tap, click, input, type, swipe, scroll, or press unless that action itself is the user's goal.\n"
             "- Use 'Precondition: ... Goal: ...' for every step.\n"
-            "- For the first step, use 'Precondition: None. Goal: ...' if needed.\n\n"
+            "- For the first step, use 'Precondition: None. Goal: ...' if needed.\n"
+            "- When multiple related contact fields must be filled on a contact editor screen, prefer one coherent form-filling subtask.\n"
+            "- Only split a contact form into individual field subtasks if a specific field previously failed and needs isolated retry.\n"
+            "- If history shows saved_but_task_check_failed, saved_with_wrong_identity, or field_misgrounded, do not return complete_goal; return a repair-oriented functional subtask instead.\n"
+            "- If history already shows grouped form partial progress on a contact editor, do not fall back to one field per step unless a specific field retry is explicitly required.\n\n"
+            "Canonical contact-creation milestones:\n"
+            "- Open the Phone app.\n"
+            "- Navigate to the contacts section.\n"
+            "- Reach the contact creation entry point.\n"
+            "- Fill in <name> and <phone> in the contact form.\n\n"
             "Examples:\n"
             "- Good: 'Open the Phone app.'\n"
             "- Good: 'Navigate to the contacts section.'\n"
-            "- Good: 'Start creating a new contact.'\n"
+            "- Good: 'Reach the contact creation entry point.'\n"
+            "- Good: 'Fill in Mia Garcia and +18856139998 in the contact form.'\n"
             "- Bad: 'Tap the Phone app icon.'\n"
             "- Bad: 'Click the Contacts tab.'\n"
-            "- Bad: 'Tap the Create new contact button.'\n\n"
+            "- Bad: 'Tap the Create new contact button.'\n"
+            "- Bad: \"Enter the first name 'Mia' into the First name field.\"\n"
+            "- Bad: \"Enter the last name 'Garcia' into the Last name field.\"\n"
+            "- Bad: \"Enter the phone number '+18856139998' into the Phone field.\"\n\n"
             "Output:\n"
             "If the overall goal is achieved, return only:\n"
             '{"tool":"complete_goal","message":"..."}\n\n'
@@ -349,6 +362,11 @@ class AndroidTaskPlanner:
             "- Each Goal should usually take around 2-6 atomic actions.\n"
             "- If the UI already shows an entry point, describe the state to reach, not the tap itself.\n"
             "- For text-entry subtasks, describe the desired filled state, not actor protocol names like input_text or type.\n"
+            "- On a contact editor screen, prefer one subtask that fills the visible contact form section instead of one subtask per individual field unless a field-specific retry is necessary.\n"
+            "- For contact creation, prefer these milestone goals exactly when they fit: Open the Phone app; Navigate to the contacts section; Reach the contact creation entry point; Fill in <name> and <phone> in the contact form.\n"
+            "- If task history says a referenced UI target was absent from the observation, replan to a safer functional milestone instead of repeating the same target claim.\n"
+            "- If task history shows saved_but_task_check_failed, saved_with_wrong_identity, or field_misgrounded, output a repair subtask such as re-entering the contact editor or verifying and correcting the required contact fields.\n"
+            "- If the current screen is a contact detail page but the validator has not yet succeeded, do not output complete_goal.\n"
         )
 
     def _format_task_history(self, task_history: List[Dict[str, Any]]) -> str:
@@ -358,10 +376,17 @@ class AndroidTaskPlanner:
         stable_lines: list[str] = []
         warning_lines: list[str] = []
         recent_items = self._compress_history_items(task_history[-self.config.max_history_items :])
+        summarized_subtasks = {
+            str(item.get("task") or item.get("subtask") or "").strip()
+            for item in recent_items
+            if item.get("source") == "subtask_summary"
+        }
         for index, item in enumerate(recent_items, start=1):
             task = str(item.get("task") or item.get("subtask") or "").strip() or "Unknown task"
+            if item.get("source") == "actor" and task in summarized_subtasks:
+                continue
             status = str(item.get("status") or item.get("result") or "unknown").strip()
-            reason = str(item.get("reason") or item.get("note") or "").strip()
+            reason = str(item.get("reason") or item.get("summary") or item.get("note") or "").strip()
             line = f"{index}. task={task}; status={status}"
             if reason:
                 line += f"; reason={reason}"

@@ -63,7 +63,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                     {
                         "subtask": {
                             "precondition": "None",
-                            "goal": "Open Contacts",
+                            "goal": "Fill in Sara Khan and +15102899176 in the contact form.",
                             "reason": "Need app",
                             "agent": "android_actor",
                         },
@@ -99,6 +99,17 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                                 }
                             ],
                         },
+                        "subtask_success_check": {
+                            "success_rule": "contact_form_fields_match_expected_values",
+                            "runner_overrode_to_completed": True,
+                            "progress_made": True,
+                            "form_fill_progress": {
+                                "expected_fields": {"first_name": "Sara", "last_name": "Khan", "phone": "+15102899176"},
+                                "actual_values": {"first_name": "Sara", "last_name": "Khan", "phone": "+15102899176"},
+                                "completed_fields": ["first_name", "last_name", "phone"],
+                                "remaining_fields": [],
+                            },
+                        },
                         "post_observation": build_observation("after"),
                     }
                 ],
@@ -114,10 +125,15 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
             self.assertTrue((subtask_dir / "actor_seen_step_01.png").exists())
             self.assertTrue((round_dir / "round_summary.md").exists())
             self.assertTrue((subtask_dir / "subtask_summary.md").exists())
+            self.assertTrue((subtask_dir / "form_fill_progress.json").exists())
             self.assertEqual(artifact_index["planner"]["round_summary"], str(round_dir / "round_summary.md"))
             self.assertEqual(
                 artifact_index["subtasks"][0]["steps"][0]["actor_seen_image"],
                 str(subtask_dir / "actor_seen_step_01.png"),
+            )
+            self.assertEqual(
+                artifact_index["subtasks"][0]["form_fill_progress"],
+                str(subtask_dir / "form_fill_progress.json"),
             )
 
     def test_build_light_run_result_excludes_full_round_payloads(self) -> None:
@@ -151,6 +167,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
         self.assertIn("# Run Summary", summary)
         self.assertIn("ContactsAddContact", summary)
         self.assertIn("replan_reason=x", summary)
+        self.assertIn("group_form_subtask_used", summary)
 
 
 if __name__ == "__main__":

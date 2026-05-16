@@ -142,6 +142,7 @@ def observation_summary_lines(observation: dict[str, Any] | None) -> list[str]:
 def build_subtask_summary(subtask_run: dict[str, Any]) -> str:
     actor_result = subtask_run["actor_result"]
     success_check = subtask_run.get("subtask_success_check") or {}
+    form_fill_progress = success_check.get("form_fill_progress") or {}
     lines = [
         "# Subtask Summary",
         "",
@@ -153,9 +154,24 @@ def build_subtask_summary(subtask_run: dict[str, Any]) -> str:
         f"- Final warning: {(subtask_run.get('post_observation') or {}).get('observation_warning') or 'None'}",
         f"- Text entry success detected: {str((success_check.get('success_rule') or '')).startswith('text_entry_')}",
         "",
-        "| Step | Reason | Action | Result | Observation warning |",
-        "| --- | --- | --- | --- | --- |",
     ]
+    if form_fill_progress:
+        lines.extend(
+            [
+                "## Form Fill Progress",
+                f"- Completed fields: {', '.join(form_fill_progress.get('completed_fields') or []) or 'None'}",
+                f"- Remaining fields: {', '.join(form_fill_progress.get('remaining_fields') or []) or 'None'}",
+                f"- Expected fields: {json.dumps(form_fill_progress.get('expected_fields') or {}, ensure_ascii=False)}",
+                f"- Actual values: {json.dumps(form_fill_progress.get('actual_values') or {}, ensure_ascii=False)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "| Step | Reason | Action | Result | Observation warning |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
     for step in actor_result.get("steps", []):
         action = step.get("action") or {}
         warning = ((step.get("after_observation") or step.get("before_observation") or {}).get("observation_warning") or "None")
@@ -260,6 +276,9 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
         "actor_action_alias_normalized": 0,
         "recoverable_schema_error": 0,
         "text_entry_success_detected": 0,
+        "group_form_subtask_used": 0,
+        "form_fill_partial_progress": 0,
+        "field_level_fallback_used": 0,
     }
     for round_record in run_result.get("planner_rounds", []):
         reason = str(round_record.get("replan_reason") or "")
@@ -272,10 +291,18 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
         if (round_record.get("planner_parse_repair") or {}).get("repaired_parse"):
             failure_counts["planner_near_json_repaired"] += 1
         for subtask_run in round_record.get("subtask_runs", []):
+            success_check = subtask_run.get("subtask_success_check") or {}
             if (subtask_run.get("subtask_success_check") or {}).get("runner_overrode_to_completed"):
                 failure_counts["actor_overshoot_after_goal"] += 1
-            if str((subtask_run.get("subtask_success_check") or {}).get("success_rule") or "").startswith("text_entry_"):
+            if str(success_check.get("success_rule") or "").startswith("text_entry_"):
                 failure_counts["text_entry_success_detected"] += 1
+            if success_check.get("form_fill_progress"):
+                failure_counts["group_form_subtask_used"] += 1
+            if success_check.get("progress_made") and not success_check.get("success_rule") and success_check.get("form_fill_progress"):
+                failure_counts["form_fill_partial_progress"] += 1
+            goal_text = str((subtask_run.get("subtask") or {}).get("goal") or "").lower()
+            if "enter the first name" in goal_text or "enter the last name" in goal_text or "enter the phone number" in goal_text:
+                failure_counts["field_level_fallback_used"] += 1
             for step in (subtask_run.get("actor_result") or {}).get("steps", []):
                 if step.get("action_normalization_applied"):
                     failure_counts["actor_action_alias_normalized"] += 1
@@ -314,6 +341,9 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
             f"- actor_action_alias_normalized: {failure_counts['actor_action_alias_normalized']}",
             f"- recoverable_schema_error: {failure_counts['recoverable_schema_error']}",
             f"- text_entry_success_detected: {failure_counts['text_entry_success_detected']}",
+            f"- group_form_subtask_used: {failure_counts['group_form_subtask_used']}",
+            f"- form_fill_partial_progress: {failure_counts['form_fill_partial_progress']}",
+            f"- field_level_fallback_used: {failure_counts['field_level_fallback_used']}",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -412,6 +442,7 @@ def write_round_artifacts(run_dir: Path, round_record: dict[str, Any]) -> dict[s
         actor_result = subtask_run["actor_result"]
         save_json(subtask_dir / "actor_result.json", actor_result)
         save_json(subtask_dir / "subtask_success_check.json", subtask_run.get("subtask_success_check") or {})
+        save_json(subtask_dir / "form_fill_progress.json", (subtask_run.get("subtask_success_check") or {}).get("form_fill_progress") or {})
         save_json(
             subtask_dir / "actor_action_normalization.json",
             [
@@ -434,6 +465,7 @@ def write_round_artifacts(run_dir: Path, round_record: dict[str, Any]) -> dict[s
             "subtask_dir": str(subtask_dir),
             "actor_result": str(subtask_dir / "actor_result.json"),
             "subtask_success_check": str(subtask_dir / "subtask_success_check.json"),
+            "form_fill_progress": str(subtask_dir / "form_fill_progress.json"),
             "actor_action_normalization": str(subtask_dir / "actor_action_normalization.json"),
             "subtask_summary": str(subtask_dir / "subtask_summary.md"),
             "steps": [],

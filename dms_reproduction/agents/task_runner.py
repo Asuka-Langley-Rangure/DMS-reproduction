@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Literal, Optional, Protocol
 
 from dms_reproduction.agents.android_actor import ActorRequest, ActorRunResult, AndroidActor
 from dms_reproduction.agents.planner import AndroidTaskPlanner, PlannerResult, PlannerSubtask
+from dms_reproduction.memory import MemoryEvent, MemoryProvider, NoOpMemoryProvider
 
 
 TaskRunStatus = Literal[
@@ -114,13 +115,16 @@ class AndroidTaskRunner:
         actor: AndroidActor,
         observation_adapter: ObservationAdapter,
         config: Optional[TaskRunConfig] = None,
+        memory_provider: Optional[MemoryProvider] = None,
     ) -> None:
         self.planner = planner
         self.actor = actor
         self.observation_adapter = observation_adapter
         self.config = config or TaskRunConfig()
+        self.memory_provider = memory_provider or NoOpMemoryProvider()
 
     def run_task(self, env: Any, task: Any, user_goal: str) -> TaskRunResult:
+        self.memory_provider.reset()
         task.initialize_task(env)
         observation = self.observation_adapter.capture_observation(
             env,
@@ -142,14 +146,22 @@ class AndroidTaskRunner:
             "actor_action_alias_normalized": 0,
             "recoverable_schema_error": 0,
             "text_entry_success_detected": 0,
+            "group_form_subtask_used": 0,
+            "form_fill_partial_progress": 0,
+            "field_level_fallback_used": 0,
         }
 
         for round_id in range(1, self.config.max_planner_rounds + 1):
+            planner_memory_context = self.memory_provider.build_context(
+                user_goal=user_goal,
+                observation=observation,
+                task_history=task_history,
+            )
             planner_messages = self.planner.build_messages(
                 user_goal=user_goal,
                 observation=observation,
                 task_history=task_history,
-                memory_context="",
+                memory_context=planner_memory_context,
             )
             planner_prompt = self.planner.extract_user_text_prompt(planner_messages)
             planner_raw_response = self.planner.llm_client.generate(
@@ -186,6 +198,23 @@ class AndroidTaskRunner:
 
             if planner_result.is_goal_complete:
                 success = self._task_success(task, env)
+                if not success:
+                    self._append_planner_feedback_history(
+                        task_history=task_history,
+                        round_id=round_id,
+                        status="planner_complete_but_task_check_failed",
+                        reason="Planner declared the overall goal complete, but the AndroidWorld task validator did not confirm success.",
+                        summary=(
+                            f"Planner completion message: {planner_result.completion_message or 'None'}. "
+                            f"Current activity: {observation.get('current_activity') or 'Unknown'}. "
+                            f"Foreground package: {observation.get('foreground_package') or 'Unknown'}. "
+                            "Do not declare completion again until the task validator can be satisfied by the observed state."
+                        ),
+                        observation=observation,
+                    )
+                    round_record.replan_reason = "planner_complete_but_task_check_failed"
+                    if self.config.stop_on_goal_complete:
+                        continue
                 if not success and not self.config.stop_on_goal_complete:
                     round_record.replan_reason = "planner_complete_but_task_check_failed"
                     continue
@@ -205,23 +234,22 @@ class AndroidTaskRunner:
             subtasks = planner_result.subtasks
             if self.config.max_subtasks_per_round is not None:
                 subtasks = subtasks[: self.config.max_subtasks_per_round]
-            normalized_subtasks, invalid_reason = self._normalize_planner_subtasks(subtasks)
+            normalized_subtasks, invalid_reason = self._normalize_planner_subtasks(
+                subtasks=subtasks,
+                user_goal=user_goal,
+                observation=observation,
+            )
             round_record.normalized_subtasks = [subtask.to_dict() for subtask in normalized_subtasks]
             if invalid_reason:
                 round_record.replan_reason = "planner_subtask_invalid"
                 failure_pattern_counts["planner_subtask_invalid"] += 1
-                task_history.append(
-                    {
-                        "source": "planner",
-                        "round_id": round_id,
-                        "subtask": "",
-                        "status": "planner_subtask_invalid",
-                        "reason": invalid_reason,
-                        "summary": invalid_reason,
-                        "action": None,
-                        "error": invalid_reason,
-                        "step_id": None,
-                    }
+                self._append_planner_feedback_history(
+                    task_history=task_history,
+                    round_id=round_id,
+                    status="planner_subtask_invalid",
+                    reason=invalid_reason,
+                    summary=invalid_reason,
+                    observation=observation,
                 )
                 continue
             grounding_check, grounding_reason = self._validate_subtasks_against_observation(
@@ -231,19 +259,13 @@ class AndroidTaskRunner:
             round_record.planner_grounding_check = grounding_check
             if grounding_reason:
                 round_record.replan_reason = grounding_reason
-                task_history.append(
-                    {
-                        "source": "planner",
-                        "round_id": round_id,
-                        "subtask": "",
-                        "status": grounding_reason,
-                        "reason": "Planner referenced a visible UI target that is absent from the current observation.",
-                        "summary": "Planner referenced a visible UI target that is absent from the current observation.",
-                        "action": None,
-                        "error": grounding_reason,
-                        "step_id": None,
-                        "observation_unreliable_context": self._is_unstable_observation(observation),
-                    }
+                self._append_planner_feedback_history(
+                    task_history=task_history,
+                    round_id=round_id,
+                    status=grounding_reason,
+                    reason="Planner referenced a visible UI target that is absent from the current observation.",
+                    summary=self._build_grounding_feedback_summary(grounding_check, observation),
+                    observation=observation,
                 )
                 continue
 
@@ -262,13 +284,22 @@ class AndroidTaskRunner:
                         ),
                     )
 
+                actor_memory_context = self.memory_provider.build_context(
+                    user_goal=user_goal,
+                    observation=observation,
+                    task_history=task_history,
+                )
+                actor_observation = self._prepare_actor_observation(
+                    subtask=subtask,
+                    observation=observation,
+                )
                 actor_result = self.actor.run_subtask(
                     env,
                     ActorRequest(
                         subtask=subtask.task,
-                        observation=observation,
+                        observation=actor_observation,
                         action_history=task_history,
-                        memory_context="",
+                        memory_context=actor_memory_context,
                     ),
                     self.observation_adapter,
                 )
@@ -289,7 +320,7 @@ class AndroidTaskRunner:
                             subtask=subtask.task,
                             observation=refreshed_observation,
                             action_history=task_history,
-                            memory_context="",
+                            memory_context=actor_memory_context,
                         ),
                         self.observation_adapter,
                     )
@@ -302,6 +333,16 @@ class AndroidTaskRunner:
                     current_observation=observation,
                 )
                 actor_result, success_check = self._apply_subtask_success_override(subtask, actor_result, observation)
+                actor_result, observation, success_check = self._postprocess_contact_form_subtask(
+                    env=env,
+                    task=task,
+                    user_goal=user_goal,
+                    round_id=round_id,
+                    subtask=subtask,
+                    actor_result=actor_result,
+                    current_observation=observation,
+                    success_check=success_check,
+                )
                 if retry_reason == "recoverable_schema_error":
                     failure_pattern_counts["recoverable_schema_error"] += 1
                 total_actor_steps += len(actor_result.steps)
@@ -318,11 +359,27 @@ class AndroidTaskRunner:
                     failure_pattern_counts["actor_overshoot_after_goal"] += 1
                 if str(success_check.get("success_rule") or "").startswith("text_entry_"):
                     failure_pattern_counts["text_entry_success_detected"] += 1
+                if _parse_contact_form_fill_goal(subtask.goal) is not None:
+                    failure_pattern_counts["group_form_subtask_used"] += 1
+                if success_check.get("form_fill_progress"):
+                    if success_check.get("progress_made") and not success_check.get("success_rule"):
+                        failure_pattern_counts["form_fill_partial_progress"] += 1
+                if AndroidTaskRunner._parse_text_entry_goal(subtask.goal.lower())[0]:
+                    failure_pattern_counts["field_level_fallback_used"] += 1
                 round_record.observation_transition_report.extend(
                     self._build_observation_transition_entries(subtask, actor_result)
                 )
                 self._append_actor_history(task_history, round_id, subtask, actor_result)
                 self._append_observation_warning_history(task_history, round_id, subtask, observation)
+                self._append_subtask_summary_history(task_history, round_id, subtask, actor_result, success_check)
+                self._record_memory_event(
+                    user_goal=user_goal,
+                    round_id=round_id,
+                    subtask=subtask,
+                    actor_result=actor_result,
+                    success_check=success_check,
+                    observation=observation,
+                )
 
                 if actor_result.status == "completed":
                     recent_completed_subtasks[subtask.task] = recent_completed_subtasks.get(subtask.task, 0) + 1
@@ -345,10 +402,14 @@ class AndroidTaskRunner:
                     observation,
                 )
                 failure_reason = self._classify_actor_failure(actor_result)
+                terminal_replan_reason = str(success_check.get("terminal_failure_reason") or "").strip() or None
 
                 if unstable_persisted:
                     failure_pattern_counts["unstable_observation"] += 1
                     round_record.replan_reason = "observation_unstable_persisted"
+                    break
+                if terminal_replan_reason:
+                    round_record.replan_reason = terminal_replan_reason
                     break
                 if actor_result.status != "completed":
                     if failure_reason == "invalid_index_error":
@@ -385,6 +446,19 @@ class AndroidTaskRunner:
     @staticmethod
     def _task_success(task: Any, env: Any) -> bool:
         return bool(task.is_successful(env) == 1)
+
+    @staticmethod
+    def _prepare_actor_observation(
+        *,
+        subtask: PlannerSubtask,
+        observation: dict[str, Any],
+    ) -> dict[str, Any]:
+        form_context = _build_contact_form_context(subtask.goal, observation)
+        if form_context is None:
+            return observation
+        prepared = dict(observation)
+        prepared["contact_form_context"] = form_context
+        return prepared
 
     @staticmethod
     def _append_actor_history(
@@ -546,7 +620,11 @@ class AndroidTaskRunner:
                 subtask=subtask.task,
                 observation=refreshed_observation,
                 action_history=task_history,
-                memory_context="",
+                memory_context=self.memory_provider.build_context(
+                    user_goal=user_goal,
+                    observation=refreshed_observation,
+                    task_history=task_history,
+                ),
             ),
             self.observation_adapter,
         )
@@ -554,6 +632,112 @@ class AndroidTaskRunner:
         if self._is_unstable_observation(retried_final_observation):
             return retried_actor_result, retried_final_observation, True
         return retried_actor_result, retried_final_observation, False
+
+    def _postprocess_contact_form_subtask(
+        self,
+        *,
+        env: Any,
+        task: Any,
+        user_goal: str,
+        round_id: int,
+        subtask: PlannerSubtask,
+        actor_result: ActorRunResult,
+        current_observation: dict[str, Any],
+        success_check: dict[str, Any],
+    ) -> tuple[ActorRunResult, dict[str, Any], dict[str, Any]]:
+        expected = _parse_contact_form_fill_goal(subtask.goal)
+        if expected is None:
+            return actor_result, current_observation, success_check
+
+        required_identity = {
+            "full_name": f"{expected['first_name']} {expected['last_name']}",
+            "phone_number": expected["phone_number"],
+        }
+        success_check["form_fill_stage"] = success_check.get("form_fill_stage") or "editing_in_progress"
+        success_check["saved_but_task_check_failed"] = bool(success_check.get("saved_but_task_check_failed"))
+        success_check["saved_with_wrong_identity"] = bool(success_check.get("saved_with_wrong_identity"))
+        success_check["observed_contact_identity"] = success_check.get("observed_contact_identity")
+        success_check["required_contact_identity"] = required_identity
+        success_check["target_fields"] = ["first_name", "last_name", "phone"]
+        success_check["off_target_field_touched"] = success_check.get("off_target_field_touched")
+        success_check["mismatched_target_fields"] = list(success_check.get("mismatched_target_fields") or [])
+        success_check["save_attempted_before_fields_complete"] = bool(success_check.get("save_attempted_before_fields_complete"))
+        success_check["terminal_failure_reason"] = success_check.get("terminal_failure_reason")
+
+        if not success_check.get("form_fill_progress"):
+            fallback_progress = self._match_contact_form_fill_success(subtask.goal, current_observation)
+            if fallback_progress is not None:
+                success_check["progress_made"] = bool(fallback_progress.get("progress_made"))
+                success_check["form_fill_progress"] = fallback_progress
+
+        form_progress = success_check.get("form_fill_progress") or {}
+        if success_check.get("success_rule"):
+            success_check["form_fill_stage"] = "all_required_fields_match"
+
+        action_issues = _detect_contact_form_action_issues(actor_result, expected)
+        success_check["off_target_field_touched"] = action_issues.get("off_target_field_touched")
+        success_check["mismatched_target_fields"] = action_issues.get("mismatched_target_fields") or []
+        save_attempted = bool(action_issues.get("save_attempted"))
+        remaining_fields = list(form_progress.get("remaining_fields") or [])
+        if save_attempted and remaining_fields:
+            success_check["save_attempted_before_fields_complete"] = True
+            success_check["form_fill_stage"] = "save_attempted"
+
+        if actor_result.status == "completed" and remaining_fields and not save_attempted:
+            actor_result.status = "step_limit"
+            actor_result.completion_message = (
+                "Grouped contact form is still incomplete; do not mark complete before all required fields match."
+            )
+            success_check["terminal_failure_reason"] = "contact_form_incomplete"
+
+        if success_check["off_target_field_touched"] or success_check["mismatched_target_fields"]:
+            actor_result.status = "infeasible"
+            actor_result.completion_message = (
+                "Actor edited fields outside the required contact form target set or used mismatched values."
+            )
+            success_check["terminal_failure_reason"] = "field_misgrounded"
+
+        needs_post_save_refresh = save_attempted or (
+            actor_result.status == "completed"
+            and not success_check.get("success_rule")
+            and not _is_contact_editor_observation(actor_result.final_observation or current_observation)
+        )
+        if needs_post_save_refresh:
+            refreshed_observation = self.observation_adapter.capture_observation(
+                env,
+                goal=user_goal,
+                step_id=round_id + len(actor_result.steps) + 1,
+                include_screenshots=True,
+            )
+            actor_result.final_observation = refreshed_observation
+            current_observation = refreshed_observation
+            if _parse_contact_form_fill_goal(subtask.goal) is not None:
+                refreshed_progress = self._match_contact_form_fill_success(subtask.goal, refreshed_observation)
+                if refreshed_progress is not None:
+                    success_check["progress_made"] = bool(refreshed_progress.get("progress_made"))
+                    success_check["form_fill_progress"] = refreshed_progress
+                    if refreshed_progress.get("success_rule"):
+                        success_check["success_rule"] = refreshed_progress.get("success_rule")
+                        success_check["form_fill_stage"] = "all_required_fields_match"
+            if save_attempted:
+                success_check["form_fill_stage"] = "save_attempted"
+            if not _is_contact_editor_observation(refreshed_observation):
+                success_check["form_fill_stage"] = "saved_but_not_validated"
+                observed_identity = _extract_contact_identity_from_observation(refreshed_observation)
+                success_check["observed_contact_identity"] = observed_identity
+                validator_success = self._task_success(task, env)
+                if validator_success:
+                    success_check["terminal_failure_reason"] = "saved_contact_state_changed"
+                    if not actor_result.completion_message:
+                        actor_result.completion_message = "Contact details were saved and the task validator confirmed success."
+                    return actor_result, refreshed_observation, success_check
+                success_check["saved_but_task_check_failed"] = True
+                success_check["terminal_failure_reason"] = "saved_but_task_check_failed"
+                if observed_identity and _normalize_field_value(observed_identity) != _normalize_field_value(required_identity["full_name"]):
+                    success_check["saved_with_wrong_identity"] = True
+                    success_check["terminal_failure_reason"] = "saved_with_wrong_identity"
+
+        return actor_result, current_observation, success_check
 
     @staticmethod
     def _apply_subtask_success_override(
@@ -567,11 +751,31 @@ class AndroidTaskRunner:
             "success_rule": None,
             "evidence_observation": None,
             "progress_made": False,
+            "form_fill_progress": None,
+            "form_fill_stage": None,
+            "saved_but_task_check_failed": False,
+            "saved_with_wrong_identity": False,
+            "observed_contact_identity": None,
+            "required_contact_identity": None,
+            "target_fields": None,
+            "off_target_field_touched": None,
+            "mismatched_target_fields": [],
+            "save_attempted_before_fields_complete": False,
+            "terminal_failure_reason": None,
         }
         matched = AndroidTaskRunner._match_subtask_success(subtask, actor_result, current_observation)
         if matched is None:
             return actor_result, success_check
-        observation, success_rule = matched
+        observation = matched["observation"]
+        success_rule = matched.get("success_rule")
+        success_check["progress_made"] = bool(matched.get("progress_made"))
+        success_check["form_fill_progress"] = matched.get("form_fill_progress")
+        success_check["override_blocked_reason"] = None
+        if not success_rule:
+            return actor_result, success_check
+        if AndroidTaskRunner._override_completion_blocked(observation):
+            success_check["override_blocked_reason"] = "observation_not_reliable_for_completion"
+            return actor_result, success_check
         success_check["runner_overrode_to_completed"] = actor_result.status != "completed"
         success_check["success_rule"] = success_rule
         success_check["evidence_observation"] = {
@@ -590,7 +794,7 @@ class AndroidTaskRunner:
         subtask: PlannerSubtask,
         actor_result: ActorRunResult,
         current_observation: dict[str, Any],
-    ) -> tuple[dict[str, Any], str] | None:
+    ) -> dict[str, Any] | None:
         observations: list[dict[str, Any]] = []
         for step in actor_result.steps:
             if step.after_observation:
@@ -600,24 +804,79 @@ class AndroidTaskRunner:
         if not observations:
             observations.append(current_observation)
         goal_lower = subtask.goal.lower()
+        best_form_fill_match: dict[str, Any] | None = None
         for observation in observations:
             if "open the phone app" in goal_lower:
                 if (observation.get("foreground_package") or "").endswith("dialer"):
-                    return observation, "foreground_package_matches_phone_app"
+                    return {"observation": observation, "success_rule": "foreground_package_matches_phone_app", "progress_made": True}
             if "open the contacts app" in goal_lower:
                 foreground_package = observation.get("foreground_package") or ""
                 if foreground_package.endswith("contacts") or "contact" in (observation.get("current_activity") or "").lower():
-                    return observation, "foreground_package_matches_contacts_app"
+                    return {"observation": observation, "success_rule": "foreground_package_matches_contacts_app", "progress_made": True}
             if "navigate to the contacts section" in goal_lower:
                 if AndroidTaskRunner._contacts_section_active(observation):
-                    return observation, "contacts_section_selected"
-            if "start creating a new contact" in goal_lower or "create a new contact" == goal_lower.strip(". "):
+                    return {"observation": observation, "success_rule": "contacts_section_selected", "progress_made": True}
+            if (
+                "start creating a new contact" in goal_lower
+                or "create a new contact" == goal_lower.strip(". ")
+                or "reach the contact creation entry point" in goal_lower
+            ):
                 if "contacteditoractivity" in (observation.get("current_activity") or "").lower():
-                    return observation, "contact_editor_activity_visible"
+                    return {"observation": observation, "success_rule": "contact_editor_activity_visible", "progress_made": True}
+            form_fill_match = AndroidTaskRunner._match_contact_form_fill_success(subtask.goal, observation)
+            if form_fill_match is not None:
+                candidate = {
+                    "observation": observation,
+                    "success_rule": form_fill_match.get("success_rule"),
+                    "progress_made": form_fill_match.get("progress_made", False),
+                    "form_fill_progress": form_fill_match,
+                }
+                if candidate.get("success_rule"):
+                    return candidate
+                if best_form_fill_match is None or len(candidate["form_fill_progress"].get("completed_fields") or []) > len(best_form_fill_match["form_fill_progress"].get("completed_fields") or []):
+                    best_form_fill_match = candidate
             text_entry_match = AndroidTaskRunner._match_text_entry_success(goal_lower, observation)
             if text_entry_match is not None:
-                return observation, text_entry_match
-        return None
+                return {"observation": observation, "success_rule": text_entry_match, "progress_made": True}
+        return best_form_fill_match
+
+    @staticmethod
+    def _match_contact_form_fill_success(goal_text: str, observation: dict[str, Any]) -> dict[str, Any] | None:
+        expected = _parse_contact_form_fill_goal(goal_text)
+        if expected is None:
+            return None
+        actual_values = _extract_contact_form_values(observation)
+        visible_fields = _extract_visible_contact_field_labels(observation)
+        completed_fields: list[str] = []
+        remaining_fields: list[str] = []
+        expected_fields = {
+            "first_name": expected["first_name"],
+            "last_name": expected["last_name"],
+            "phone": expected["phone_number"],
+        }
+        for field_name, expected_value in expected_fields.items():
+            actual_value = _normalize_field_value(actual_values.get(field_name))
+            if actual_value and actual_value == _normalize_field_value(expected_value):
+                completed_fields.append(field_name)
+            else:
+                remaining_fields.append(field_name)
+        progress = {
+            "expected_fields": expected_fields,
+            "actual_values": actual_values,
+            "completed_fields": completed_fields,
+            "remaining_fields": remaining_fields,
+            "visible_fields": visible_fields,
+            "required_field_indices": _extract_contact_field_indices(observation),
+        }
+        if not completed_fields:
+            return None
+        if not remaining_fields:
+            progress["success_rule"] = "contact_form_fields_match_expected_values"
+            progress["progress_made"] = True
+            return progress
+        progress["success_rule"] = None
+        progress["progress_made"] = True
+        return progress
 
     @staticmethod
     def _match_text_entry_success(goal_lower: str, observation: dict[str, Any]) -> str | None:
@@ -676,27 +935,124 @@ class AndroidTaskRunner:
         return False
 
     @staticmethod
-    def _normalize_planner_subtasks(subtasks: list[PlannerSubtask]) -> tuple[list[PlannerSubtask], str | None]:
+    def _normalize_planner_subtasks(
+        subtasks: list[PlannerSubtask],
+        user_goal: str,
+        observation: dict[str, Any],
+    ) -> tuple[list[PlannerSubtask], str | None]:
         normalized: list[PlannerSubtask] = []
+        seen_tasks: set[str] = set()
         for subtask in subtasks:
-            goal_lower = subtask.goal.lower()
-            precondition_lower = subtask.precondition.lower()
-            if "open" in precondition_lower and "click on the phone app to open it" in goal_lower:
-                normalized.append(
-                    PlannerSubtask(
-                        precondition=subtask.precondition,
-                        goal="Navigate to the contacts section.",
-                        reason=subtask.reason,
-                        agent=subtask.agent,
-                    )
-                )
+            canonical_subtask = _canonicalize_contact_subtask(
+                subtask=subtask,
+                user_goal=user_goal,
+                observation=observation,
+            )
+            if canonical_subtask is not None:
+                if canonical_subtask.task not in seen_tasks:
+                    normalized.append(canonical_subtask)
+                    seen_tasks.add(canonical_subtask.task)
                 continue
             if _is_contradictory_subtask(subtask.precondition, subtask.goal):
                 return [], (
                     f"Planner produced contradictory subtask: Precondition={subtask.precondition!r}, Goal={subtask.goal!r}"
                 )
-            normalized.append(subtask)
+            if subtask.task not in seen_tasks:
+                normalized.append(subtask)
+                seen_tasks.add(subtask.task)
         return normalized, None
+
+    @staticmethod
+    def _override_completion_blocked(observation: dict[str, Any]) -> bool:
+        if AndroidTaskRunner._is_unstable_observation(observation):
+            return True
+        warning = str(observation.get("observation_warning") or "").strip()
+        if warning:
+            return True
+        if observation.get("non_system_ui_count", 0) == 0:
+            return True
+        return False
+
+    @staticmethod
+    def _build_grounding_feedback_summary(grounding_check: list[dict[str, Any]], observation: dict[str, Any]) -> str:
+        visible_labels = []
+        for element in observation.get("ui_elements") or []:
+            for field in ("text", "content_description", "resource_name"):
+                value = str(element.get(field) or "").strip()
+                if value:
+                    visible_labels.append(value)
+                    break
+        visible_excerpt = ", ".join(visible_labels[:6]) or "None"
+        missing_targets = sorted(
+            {
+                target
+                for check in grounding_check
+                for target in (check.get("missing_targets") or [])
+            }
+        )
+        missing_text = ", ".join(missing_targets) or "None"
+        return (
+            "Planner referenced a UI target that is absent from the current observation. "
+            f"Missing targets: {missing_text}. "
+            f"Current activity: {observation.get('current_activity') or 'Unknown'}. "
+            f"Foreground package: {observation.get('foreground_package') or 'Unknown'}. "
+            f"Visible UI labels: {visible_excerpt}. "
+            "Replan to the next safe functional milestone instead of repeating the same target claim."
+        )
+
+    @staticmethod
+    def _append_planner_feedback_history(
+        task_history: list[dict[str, Any]],
+        round_id: int,
+        status: str,
+        reason: str,
+        summary: str,
+        observation: dict[str, Any],
+    ) -> None:
+        task_history.append(
+            {
+                "source": "planner",
+                "round_id": round_id,
+                "subtask": "",
+                "status": status,
+                "reason": reason,
+                "summary": summary,
+                "action": None,
+                "error": status,
+                "step_id": None,
+                "observation_unreliable_context": AndroidTaskRunner._is_unstable_observation(observation),
+            }
+        )
+
+    def _record_memory_event(
+        self,
+        *,
+        user_goal: str,
+        round_id: int,
+        subtask: PlannerSubtask,
+        actor_result: ActorRunResult,
+        success_check: dict[str, Any],
+        observation: dict[str, Any],
+    ) -> None:
+        summary = success_check.get("success_rule") or actor_result.completion_message or actor_result.status
+        event = MemoryEvent(
+            user_goal=user_goal,
+            round_id=round_id,
+            subtask=subtask.task,
+            status=actor_result.status,
+            summary=str(summary),
+            success_check=success_check,
+            observation_digest={
+                "current_activity": observation.get("current_activity"),
+                "foreground_package": observation.get("foreground_package"),
+                "app_name": observation.get("app_name"),
+                "observation_warning": observation.get("observation_warning"),
+                "observation_consistency": observation.get("observation_consistency"),
+                "non_system_ui_count": observation.get("non_system_ui_count"),
+                "clickable_ui_count": observation.get("clickable_ui_count"),
+            },
+        )
+        self.memory_provider.record(event.to_dict())
 
     @staticmethod
     def _validate_subtasks_against_observation(
@@ -821,6 +1177,113 @@ class AndroidTaskRunner:
             )
         return f"Round limit reached after {len(planner_rounds)} planner rounds; last replan reason: {last_reason}."
 
+    @staticmethod
+    def _append_subtask_summary_history(
+        task_history: list[dict[str, Any]],
+        round_id: int,
+        subtask: PlannerSubtask,
+        actor_result: ActorRunResult,
+        success_check: dict[str, Any],
+    ) -> None:
+        form_progress = success_check.get("form_fill_progress") or {}
+        if success_check.get("saved_with_wrong_identity"):
+            observed_identity = success_check.get("observed_contact_identity") or "unknown"
+            required_identity = (success_check.get("required_contact_identity") or {}).get("full_name") or "unknown"
+            reason = (
+                f"Saved contact identity did not match the target. Observed: {observed_identity}; "
+                f"required: {required_identity}. Re-enter the editor and correct the fields."
+            )
+            task_history.append(
+                {
+                    "source": "subtask_summary",
+                    "round_id": round_id,
+                    "subtask": subtask.task,
+                    "status": "saved_with_wrong_identity",
+                    "reason": reason,
+                    "summary": reason,
+                    "action": None,
+                    "error": "",
+                    "step_id": None,
+                    "observation_unreliable_context": False,
+                }
+            )
+            return
+        if success_check.get("saved_but_task_check_failed"):
+            observed_identity = success_check.get("observed_contact_identity") or "unknown"
+            reason = (
+                "Contact details were saved, but the AndroidWorld task validator did not confirm success. "
+                f"Observed contact identity: {observed_identity}."
+            )
+            task_history.append(
+                {
+                    "source": "subtask_summary",
+                    "round_id": round_id,
+                    "subtask": subtask.task,
+                    "status": "saved_but_task_check_failed",
+                    "reason": reason,
+                    "summary": reason,
+                    "action": None,
+                    "error": "",
+                    "step_id": None,
+                    "observation_unreliable_context": False,
+                }
+            )
+            return
+        if success_check.get("terminal_failure_reason") == "field_misgrounded":
+            wrong_field = success_check.get("off_target_field_touched") or "unknown"
+            mismatch = ", ".join(success_check.get("mismatched_target_fields") or []) or "none"
+            reason = (
+                f"Grouped contact form execution drifted off target. Off-target field: {wrong_field}; "
+                f"mismatched target fields: {mismatch}."
+            )
+            task_history.append(
+                {
+                    "source": "subtask_summary",
+                    "round_id": round_id,
+                    "subtask": subtask.task,
+                    "status": "field_misgrounded",
+                    "reason": reason,
+                    "summary": reason,
+                    "action": None,
+                    "error": "",
+                    "step_id": None,
+                    "observation_unreliable_context": False,
+                }
+            )
+            return
+        if not form_progress:
+            return
+        completed_fields = form_progress.get("completed_fields") or []
+        remaining_fields = form_progress.get("remaining_fields") or []
+        if success_check.get("success_rule"):
+            status = "completed"
+            reason = (
+                f"Completed grouped contact form fill. Filled fields: {', '.join(completed_fields)}."
+            )
+        elif success_check.get("progress_made"):
+            status = "partial_progress"
+            reason = (
+                f"Partial grouped contact form progress. Filled fields: {', '.join(completed_fields) or 'none'}; "
+                f"remaining fields: {', '.join(remaining_fields) or 'none'}."
+            )
+        else:
+            status = "failed" if actor_result.status != "completed" else "completed"
+            reason = actor_result.completion_message or actor_result.status
+        task_history.append(
+            {
+                "source": "subtask_summary",
+                "round_id": round_id,
+                "subtask": subtask.task,
+                "status": status,
+                "reason": reason,
+                "summary": reason,
+                "action": None,
+                "error": "",
+                "step_id": None,
+                "observation_unreliable_context": False,
+            }
+        )
+
 
 def _is_contradictory_subtask(precondition: str, goal: str) -> bool:
     precondition_lower = precondition.lower()
@@ -829,3 +1292,286 @@ def _is_contradictory_subtask(precondition: str, goal: str) -> bool:
     if open_match and f"open the {open_match.group(1)} app" in goal_lower:
         return True
     return False
+
+
+def _canonicalize_contact_subtask(
+    subtask: PlannerSubtask,
+    user_goal: str,
+    observation: dict[str, Any],
+) -> PlannerSubtask | None:
+    goal_lower = subtask.goal.lower().strip()
+    precondition_lower = subtask.precondition.lower().strip()
+    reason_lower = subtask.reason.lower().strip()
+    combined_text = " ".join(part for part in (precondition_lower, goal_lower, reason_lower) if part)
+    contact_goal = _parse_contact_identity_goal(user_goal)
+    on_contact_editor = "contacteditoractivity" in str(observation.get("current_activity") or "").lower()
+
+    def rewrite(goal: str) -> PlannerSubtask:
+        return PlannerSubtask(
+            precondition=subtask.precondition,
+            goal=goal,
+            reason=subtask.reason,
+            agent=subtask.agent,
+        )
+
+    foreground_package = str(observation.get("foreground_package") or "").lower()
+    if "click on the phone app to open it" in goal_lower or "tap the phone app icon" in goal_lower:
+        if "phone app is open" in precondition_lower:
+            return rewrite("Navigate to the contacts section.")
+        return rewrite("Open the Phone app.")
+    if "open the phone app" in goal_lower and foreground_package.endswith("dialer"):
+        if AndroidTaskRunner._contacts_section_active(observation):
+            return rewrite("Reach the contact creation entry point.")
+        return rewrite("Navigate to the contacts section.")
+    if any(token in goal_lower for token in ("click the contacts tab", "tap the contacts tab", "navigate to contacts", "navigate to the contacts")):
+        return rewrite("Navigate to the contacts section.")
+    if any(token in combined_text for token in ("create new contact", "add contact", "contact creation", "create contact flow")):
+        if on_contact_editor and contact_goal is not None:
+            return rewrite(
+                f"Fill in {contact_goal['full_name']} and {contact_goal['phone_number']} in the contact form."
+            )
+        if any(token in goal_lower for token in ("tap", "click", "press", "open")) or "visible" in reason_lower:
+            return rewrite("Reach the contact creation entry point.")
+    if on_contact_editor and contact_goal is not None:
+        if _is_field_entry_goal(goal_lower):
+            return rewrite(
+                f"Fill in {contact_goal['full_name']} and {contact_goal['phone_number']} in the contact form."
+            )
+        if "contact creation screen" in combined_text and ("field" in combined_text or "editable" in combined_text):
+            return rewrite(
+                f"Fill in {contact_goal['full_name']} and {contact_goal['phone_number']} in the contact form."
+            )
+    return None
+
+
+def _is_field_entry_goal(goal_lower: str) -> bool:
+    markers = (
+        "enter the first name",
+        "enter the last name",
+        "enter the phone number",
+        "first name field",
+        "last name field",
+        "phone field",
+    )
+    return any(marker in goal_lower for marker in markers)
+
+
+def _parse_contact_identity_goal(user_goal: str) -> dict[str, str] | None:
+    match = re.search(
+        r"create a new contact for (?P<name>.+?)\.\s*their number is (?P<phone>\+?[0-9][0-9\s\-]+)\.?",
+        user_goal,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    full_name = " ".join(match.group("name").strip().split())
+    phone_number = " ".join(match.group("phone").strip().split())
+    name_parts = full_name.split()
+    if len(name_parts) < 2:
+        return None
+    return {
+        "full_name": full_name,
+        "first_name": name_parts[0],
+        "last_name": " ".join(name_parts[1:]),
+        "phone_number": phone_number,
+    }
+
+
+def _parse_contact_form_fill_goal(goal_text: str) -> dict[str, str] | None:
+    match = re.search(
+        r"fill in (?P<name>.+?) and (?P<phone>\+?[0-9][0-9\s\-]+) in the contact form",
+        goal_text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    name = " ".join(match.group("name").strip().split())
+    phone_number = " ".join(match.group("phone").strip().split())
+    name_parts = name.split()
+    if len(name_parts) < 2:
+        return None
+    return {
+        "first_name": name_parts[0],
+        "last_name": " ".join(name_parts[1:]),
+        "phone_number": phone_number,
+    }
+
+
+def _extract_contact_form_values(observation: dict[str, Any]) -> dict[str, str | None]:
+    values: dict[str, str | None] = {"first_name": None, "last_name": None, "phone": None}
+    for element in observation.get("ui_elements") or []:
+        if not bool(element.get("is_editable")):
+            continue
+        label = " ".join(
+            part.strip().lower()
+            for part in (
+                str(element.get("text") or ""),
+                str(element.get("content_description") or ""),
+                str(element.get("resource_name") or ""),
+            )
+            if part and part.strip()
+        )
+        raw = element.get("raw") or {}
+        candidates = [
+            str(raw.get("value") or "").strip(),
+            str(raw.get("text") or "").strip(),
+            str(element.get("text") or "").strip(),
+        ]
+        value = next((candidate for candidate in candidates if candidate), None)
+        if "first name" in label:
+            values["first_name"] = value
+        elif "last name" in label:
+            values["last_name"] = value
+        elif "phone" in label:
+            values["phone"] = value
+    return values
+
+
+def _extract_contact_field_indices(observation: dict[str, Any]) -> dict[str, int]:
+    indices: dict[str, int] = {}
+    for element in observation.get("ui_elements") or []:
+        field_name = _classify_contact_element(element)
+        if field_name in {"first_name", "last_name", "phone"} and element.get("index") is not None:
+            indices[field_name] = int(element["index"])
+    return indices
+
+
+def _extract_visible_contact_field_labels(observation: dict[str, Any]) -> list[str]:
+    visible_fields: list[str] = []
+    for element in observation.get("ui_elements") or []:
+        field_name = _classify_contact_element(element)
+        if field_name in {"first_name", "last_name", "phone"}:
+            visible_fields.append(field_name)
+    return visible_fields
+
+
+def _build_contact_form_context(goal_text: str, observation: dict[str, Any]) -> dict[str, Any] | None:
+    expected = _parse_contact_form_fill_goal(goal_text)
+    if expected is None or not _is_contact_editor_observation(observation):
+        return None
+    actual_values = _extract_contact_form_values(observation)
+    remaining_fields = [
+        field_name
+        for field_name, expected_value in {
+            "first_name": expected["first_name"],
+            "last_name": expected["last_name"],
+            "phone": expected["phone_number"],
+        }.items()
+        if _normalize_field_value(actual_values.get(field_name)) != _normalize_field_value(expected_value)
+    ]
+    return {
+        "target_fields": ["first_name", "last_name", "phone"],
+        "expected_fields": {
+            "first_name": expected["first_name"],
+            "last_name": expected["last_name"],
+            "phone": expected["phone_number"],
+        },
+        "current_values": actual_values,
+        "remaining_fields": remaining_fields,
+        "required_field_indices": _extract_contact_field_indices(observation),
+        "visible_fields": _extract_visible_contact_field_labels(observation),
+    }
+
+
+def _detect_contact_form_action_issues(
+    actor_result: ActorRunResult,
+    expected: dict[str, str],
+) -> dict[str, Any]:
+    off_target_field_touched: str | None = None
+    mismatched_target_fields: list[str] = []
+    save_attempted = False
+    for step in actor_result.steps:
+        action = step.action
+        if action is None:
+            continue
+        before_observation = step.before_observation or {}
+        if action.action_type == "input_text":
+            element = _find_ui_element(before_observation, getattr(action, "index", None))
+            field_name = _classify_contact_element(element) if element else None
+            if field_name in {"first_name", "last_name", "phone"}:
+                expected_value = expected["phone_number"] if field_name == "phone" else expected[field_name]
+                if _normalize_field_value(getattr(action, "text", "")) != _normalize_field_value(expected_value):
+                    mismatched_target_fields.append(field_name)
+            elif element is not None and bool(element.get("is_editable")):
+                off_target_field_touched = field_name or _normalize_contact_field_label(element) or "unknown_editable_field"
+        if action.action_type == "click":
+            element = _find_ui_element(before_observation, getattr(action, "index", None))
+            if element is not None and _classify_contact_element(element) == "save":
+                save_attempted = True
+    return {
+        "off_target_field_touched": off_target_field_touched,
+        "mismatched_target_fields": sorted(set(mismatched_target_fields)),
+        "save_attempted": save_attempted,
+    }
+
+
+def _find_ui_element(observation: dict[str, Any], index: int | None) -> dict[str, Any] | None:
+    if index is None:
+        return None
+    for element in observation.get("ui_elements") or []:
+        if element.get("index") == index:
+            return element
+    return None
+
+
+def _classify_contact_element(element: dict[str, Any] | None) -> str | None:
+    if not element:
+        return None
+    label = _contact_element_label(element)
+    if "first name" in label:
+        return "first_name"
+    if "last name" in label:
+        return "last_name"
+    if label == "phone" or "phone" in label:
+        return "phone"
+    if label == "save" or " save" in label or ":save" in label:
+        return "save"
+    return None
+
+
+def _contact_element_label(element: dict[str, Any]) -> str:
+    raw = element.get("raw") or {}
+    parts = (
+        str(element.get("text") or ""),
+        str(element.get("content_description") or ""),
+        str(element.get("resource_name") or ""),
+        str(raw.get("text") or ""),
+        str(raw.get("content_description") or ""),
+    )
+    return " ".join(part.strip().lower() for part in parts if part and part.strip())
+
+
+def _normalize_contact_field_label(element: dict[str, Any]) -> str:
+    label = _contact_element_label(element)
+    if not label:
+        return ""
+    if "company" in label:
+        return "company"
+    if "email" in label:
+        return "email"
+    return label.split()[0]
+
+
+def _is_contact_editor_observation(observation: dict[str, Any]) -> bool:
+    return "contacteditoractivity" in str(observation.get("current_activity") or "").lower()
+
+
+def _extract_contact_identity_from_observation(observation: dict[str, Any]) -> str | None:
+    candidates: list[str] = []
+    for element in observation.get("ui_elements") or []:
+        for field in ("text", "content_description"):
+            value = str(element.get(field) or "").strip()
+            if not value:
+                continue
+            quick_contact_match = re.search(r"quick contact for (?P<name>[A-Za-z]+(?: [A-Za-z]+)+)", value, flags=re.IGNORECASE)
+            if quick_contact_match:
+                return " ".join(quick_contact_match.group("name").split())
+            if re.fullmatch(r"[A-Za-z]+(?: [A-Za-z]+)+", value):
+                candidates.append(" ".join(value.split()))
+    return candidates[0] if candidates else None
+
+
+def _normalize_field_value(value: str | None) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", value.strip()).lower()

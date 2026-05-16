@@ -492,6 +492,7 @@ class AndroidActor:
             "- Before choosing an index, verify the exact numbered UI element and its properties.\n"
             "- If you mention a specific target like Phone or Contacts, the action index must match that exact visible element.\n"
             "- For text entry, use action_type input_text, not type, enter_text, fill_text, or set_text.\n"
+            "- If the subtask asks you to fill a coherent form section, fill only the required related fields for that subtask and stop once those fields are complete.\n"
             "- If the current path is not feasible, end explicitly with infeasible.\n"
             "- If the observation is unstable, degraded, or only shows system UI, prefer wait or navigate_back over guessing.\n"
             "- Treat history and memory as decision evidence, not as logs.\n"
@@ -536,6 +537,21 @@ class AndroidActor:
         dominant_ui_package = observation.get("app_name") or "Unknown"
         observation_warning = observation.get("observation_warning")
         observation_consistency = observation.get("observation_consistency") or "stable"
+        contact_form_context = observation.get("contact_form_context") or {}
+        contact_form_block = ""
+        if contact_form_context:
+            contact_form_block = (
+                "Grouped contact form constraints:\n"
+                f"- Target fields only: {json.dumps(contact_form_context.get('target_fields') or [], ensure_ascii=False)}\n"
+                f"- Expected values: {json.dumps(contact_form_context.get('expected_fields') or {}, ensure_ascii=False)}\n"
+                f"- Current values: {json.dumps(contact_form_context.get('current_values') or {}, ensure_ascii=False)}\n"
+                f"- Remaining fields: {json.dumps(contact_form_context.get('remaining_fields') or [], ensure_ascii=False)}\n"
+                f"- Required field indices: {json.dumps(contact_form_context.get('required_field_indices') or {}, ensure_ascii=False)}\n"
+                "- Only edit those required fields.\n"
+                "- Do not type into unrelated editable fields such as Company.\n"
+                "- Do not click Save until every required field matches the expected value.\n"
+                "- If the keyboard is active in the contact editor, keep working on the required fields instead of navigating away.\n\n"
+            )
         return (
             f"Subtask:\n{request.subtask}\n\n"
             "Current screen state:\n"
@@ -555,12 +571,15 @@ class AndroidActor:
             f"Recent action history:\n{self._format_history(request.action_history)}\n\n"
             "Retrieved memory context:\n"
             f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
+            f"{contact_form_block}"
             "Decision policy:\n"
             "- Execute this subtask step by step using one valid GUI action.\n"
             "- Base the choice on the current GUI state, history, and memory.\n"
             "- Prefer the smallest necessary action that advances the subtask.\n"
             "- Use status complete only when the Goal in the current subtask is satisfied.\n"
             "- Do not use status complete for navigation subtasks solely because the app is already open.\n"
+            "- If the subtask describes filling a form section, only edit the required related fields for that section and do not continue to save or navigate away.\n"
+            "- In a grouped contact form task, treat the allowed target fields as a hard constraint.\n"
             "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
             "- If the target is Phone and [#2] is the Phone element, use index 2, not a nearby container.\n"
             "- If the observation warning indicates degraded UI, avoid assuming the goal is complete.\n"
@@ -897,13 +916,14 @@ def _maybe_correct_index_payload(
         for element in ui_elements
         if element.get("index") is not None
     }
+    target_token = _extract_reason_target(reason)
     if parsed_index is not None and parsed_index in valid_indices:
         target = ui_by_index.get(parsed_index) or {}
-        if not require_clickable or bool(target.get("is_clickable")):
-            if not require_editable or bool(target.get("is_editable")):
-                return None
-
-    target_token = _extract_reason_target(reason)
+        target_is_usable = (not require_clickable or bool(target.get("is_clickable"))) and (
+            not require_editable or bool(target.get("is_editable"))
+        )
+        if target_is_usable and (not target_token or _element_matches_token(target, target_token)):
+            return None
     if not target_token:
         return None
     matches: list[dict[str, Any]] = []

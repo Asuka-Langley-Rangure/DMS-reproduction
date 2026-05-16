@@ -538,6 +538,7 @@ lrwxrwxrwx 1 chencen chencen 60  5月 10 17:33 /data1/chencen/dms_qwen/models/Qw
 
 ```powershell
 ssh -N -L 8000:127.0.0.1:8007 chencen@114.212.165.149
+ssh -N -L 8000:127.0.0.1:8007 chencen@192.168.1.85
 ```
 
 #### 测试API

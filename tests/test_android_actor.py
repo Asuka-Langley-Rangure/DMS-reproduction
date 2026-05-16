@@ -171,6 +171,28 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Observation warning", user_prompt)
         self.assertIn("Only system UI elements were retained", user_prompt)
 
+    def test_prompt_includes_grouped_contact_form_constraints(self) -> None:
+        llm = FakeLLMClient(['Reason: fill first name.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
+        actor = AndroidActor(llm)
+        observation = build_observation(activity="com.google.android.contacts/.activities.ContactEditorActivity")
+        observation["contact_form_context"] = {
+            "target_fields": ["first_name", "last_name", "phone"],
+            "expected_fields": {"first_name": "Mia", "last_name": "Fernandez", "phone": "+13268155334"},
+            "current_values": {"first_name": "", "last_name": "", "phone": ""},
+            "remaining_fields": ["first_name", "last_name", "phone"],
+            "required_field_indices": {"first_name": 5, "last_name": 6, "phone": 8},
+        }
+        request = ActorRequest(
+            subtask="Precondition: Contact editor is open. Goal: Fill in Mia Fernandez and +13268155334 in the contact form.",
+            observation=observation,
+        )
+
+        user_prompt = extract_user_text(actor.build_messages(request))
+        self.assertIn("Grouped contact form constraints", user_prompt)
+        self.assertIn("Only edit those required fields", user_prompt)
+        self.assertIn("Do not click Save until every required field matches the expected value", user_prompt)
+        self.assertIn("\"first_name\": 5", user_prompt)
+
 
 class ActorActionParsingTest(unittest.TestCase):
     def test_parse_valid_click_action(self) -> None:
@@ -251,6 +273,25 @@ class ActorActionParsingTest(unittest.TestCase):
         self.assertFalse(normalization_applied)
         self.assertIsNone(normalization_reason)
         self.assertEqual(corrected, {"action_type": "click", "index": 2})
+        self.assertIn("Corrected click target", correction_reason or "")
+
+    def test_corrects_valid_but_reason_mismatched_contacts_index(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {"index": 4, "text": None, "content_description": "Contacts", "is_clickable": True, "is_editable": False},
+            {"index": 6, "text": None, "content_description": "Start voice search", "is_clickable": True, "is_editable": False},
+        ]
+        observation["valid_ui_indices"] = [4, 6]
+        action, normalized, normalization_applied, normalization_reason, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 6},
+            observation,
+            reason="The Contacts tab is clearly visible and clickable in the current screen state.",
+        )
+        self.assertEqual(action.index, 4)
+        self.assertIsNone(normalized)
+        self.assertFalse(normalization_applied)
+        self.assertIsNone(normalization_reason)
+        self.assertEqual(corrected, {"action_type": "click", "index": 4})
         self.assertIn("Corrected click target", correction_reason or "")
 
 
