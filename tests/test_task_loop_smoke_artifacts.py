@@ -8,7 +8,12 @@ from pathlib import Path
 PIL_AVAILABLE = importlib.util.find_spec("PIL") is not None
 
 if PIL_AVAILABLE:
-    from scripts.task_loop_smoke import build_light_run_result, build_run_summary, write_round_artifacts
+    from scripts.task_loop_smoke import (
+        build_light_run_result,
+        build_run_summary,
+        write_initial_stage_plan_artifacts,
+        write_round_artifacts,
+    )
 
 
 PNG_B64 = (
@@ -41,6 +46,19 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
     def test_write_round_artifacts_outputs_images_and_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run_dir = Path(temp_dir)
+            initial_stage_plan = {
+                "planner_messages": [{"role": "user", "content": "stage plan"}],
+                "planner_prompt": "stage-plan prompt",
+                "planner_raw_response": '{"stage_plan":[{"stage_id":1,"title":"Open app","success_signal":"App is open"},{"stage_id":2,"title":"Reach target area","success_signal":"Target area is visible"},{"stage_id":3,"title":"Delete target item","success_signal":"Item is deleted"}]}',
+                "stage_plan_result": {
+                    "stage_plan": [
+                        {"stage_id": 1, "title": "Open app", "success_signal": "App is open"},
+                        {"stage_id": 2, "title": "Reach target area", "success_signal": "Target area is visible"},
+                        {"stage_id": 3, "title": "Delete target item", "success_signal": "Item is deleted"},
+                    ]
+                },
+                "revision_reason": None,
+            }
             round_record = {
                 "round_id": 1,
                 "input_observation": build_observation("initial"),
@@ -50,6 +68,19 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                 "planner_result": {
                     "is_goal_complete": False,
                     "completion_message": "",
+                    "stage_plan": [
+                        {
+                            "stage_id": 1,
+                            "title": "Open the Phone app",
+                            "success_signal": "Phone app is foreground",
+                        },
+                        {
+                            "stage_id": 2,
+                            "title": "Reach the contact creation entry point",
+                            "success_signal": "Create contact UI is visible",
+                        },
+                    ],
+                    "current_stage_id": 2,
                     "subtasks": [
                         {
                             "precondition": "None",
@@ -110,23 +141,52 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                                 "remaining_fields": [],
                             },
                         },
+                        "subtask_verification": {
+                            "status": "success",
+                            "reason": "The evidence observation shows the contact form fields already match the goal.",
+                            "memory_eligible": True,
+                            "raw_response": '{"status":"success","reason":"ok","memory_eligible":true}',
+                            "parse_error": None,
+                            "prompt_text": "verifier prompt",
+                            "messages": [{"role": "user", "content": "verifier prompt"}],
+                        },
                         "post_observation": build_observation("after"),
                     }
                 ],
                 "replan_reason": "subtasks_exhausted",
             }
 
+            initial_index = write_initial_stage_plan_artifacts(run_dir, initial_stage_plan)
             artifact_index = write_round_artifacts(run_dir, round_record)
             round_dir = run_dir / "round_01"
             subtask_dir = round_dir / "subtask_01"
 
+            self.assertTrue((run_dir / "initial_stage_plan.json").exists())
+            self.assertTrue((run_dir / "initial_stage_plan_messages.json").exists())
+            self.assertTrue((run_dir / "initial_stage_plan_prompt.txt").exists())
+            self.assertTrue((run_dir / "initial_stage_plan_raw_response.txt").exists())
             self.assertTrue((round_dir / "observation_raw.png").exists())
             self.assertTrue((round_dir / "observation_labeled.png").exists())
             self.assertTrue((subtask_dir / "actor_seen_step_01.png").exists())
             self.assertTrue((round_dir / "round_summary.md").exists())
+            self.assertTrue((round_dir / "planner_raw_quality.json").exists())
+            self.assertTrue((round_dir / "planner_stage_plan.json").exists())
+            self.assertTrue((round_dir / "planner_current_stage.json").exists())
             self.assertTrue((subtask_dir / "subtask_summary.md").exists())
             self.assertTrue((subtask_dir / "form_fill_progress.json").exists())
+            self.assertTrue((subtask_dir / "verifier_result.json").exists())
+            self.assertTrue((subtask_dir / "verifier_messages.json").exists())
+            self.assertTrue((subtask_dir / "verifier_prompt.txt").exists())
+            self.assertTrue((subtask_dir / "verifier_raw_response.txt").exists())
             self.assertEqual(artifact_index["planner"]["round_summary"], str(round_dir / "round_summary.md"))
+            self.assertEqual(
+                artifact_index["planner"]["planner_raw_quality"],
+                str(round_dir / "planner_raw_quality.json"),
+            )
+            self.assertEqual(
+                artifact_index["planner"]["planner_stage_plan"],
+                str(round_dir / "planner_stage_plan.json"),
+            )
             self.assertEqual(
                 artifact_index["subtasks"][0]["steps"][0]["actor_seen_image"],
                 str(subtask_dir / "actor_seen_step_01.png"),
@@ -134,6 +194,14 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
             self.assertEqual(
                 artifact_index["subtasks"][0]["form_fill_progress"],
                 str(subtask_dir / "form_fill_progress.json"),
+            )
+            self.assertEqual(
+                artifact_index["subtasks"][0]["verifier_result"],
+                str(subtask_dir / "verifier_result.json"),
+            )
+            self.assertEqual(
+                initial_index["initial_stage_plan"],
+                str(run_dir / "initial_stage_plan.json"),
             )
 
     def test_build_light_run_result_excludes_full_round_payloads(self) -> None:

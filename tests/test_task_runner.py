@@ -9,7 +9,7 @@ from dms_reproduction.agents.android_actor import (
     InputTextAction,
     StatusAction,
 )
-from dms_reproduction.agents.planner import PlannerResult, PlannerSubtask
+from dms_reproduction.agents.planner import PlannerResult, PlannerStage, PlannerSubtask, StagePlanResult
 from dms_reproduction.agents.task_runner import AndroidTaskRunner, TaskRunConfig
 from dms_reproduction.memory import NoOpMemoryProvider
 
@@ -191,19 +191,61 @@ def build_actor_step(step_id: int, reason: str, action, status: str, done: bool)
 
 
 class FakePlanner:
-    def __init__(self, responses: list[PlannerResult]) -> None:
+    def __init__(self, responses: list[PlannerResult], stage_plan_results: list[StagePlanResult] | None = None) -> None:
         self.responses = list(responses)
+        default_stage_plan = self._default_stage_plan_result_from_responses(self.responses)
+        self.stage_plan_results = list(stage_plan_results or [default_stage_plan])
         self.calls = []
+        self.stage_plan_calls = []
         self.llm_client = self
         self._last_response = ""
+        self._generate_mode = "current"
 
     class config:
         temperature = 0.0
 
-    def build_messages(self, user_goal: str, observation: dict, task_history: list[dict] | None = None, memory_context: str = ""):
+    @staticmethod
+    def _default_stage_plan_result() -> StagePlanResult:
+        return StagePlanResult(
+            stage_plan=[
+                PlannerStage(1, "Open the target app", "The target app is open"),
+                PlannerStage(2, "Reach the relevant working area", "The relevant screen or section is visible"),
+                PlannerStage(3, "Complete the requested action and verify it", "The requested result is visible and verified"),
+            ],
+            raw_response='{"stage_plan":[{"stage_id":1,"title":"Open the target app","success_signal":"The target app is open"},{"stage_id":2,"title":"Reach the relevant working area","success_signal":"The relevant screen or section is visible"},{"stage_id":3,"title":"Complete the requested action and verify it","success_signal":"The requested result is visible and verified"}]}',
+        )
+
+    @classmethod
+    def _default_stage_plan_result_from_responses(cls, responses: list[PlannerResult]) -> StagePlanResult:
+        for response in responses:
+            if response.stage_plan:
+                return StagePlanResult(
+                    stage_plan=list(response.stage_plan),
+                    raw_response='{"stage_plan":[]}',
+                )
+        return cls._default_stage_plan_result()
+
+    def build_stage_plan_messages(self, user_goal: str):
+        self._generate_mode = "stage_plan"
+        self.stage_plan_calls.append({"user_goal": user_goal})
+        return [
+            {"role": "system", "content": "stage-plan-system"},
+            {"role": "user", "content": [{"type": "text", "text": f"goal_only={user_goal}"}]},
+        ]
+
+    def build_current_subtasks_messages(
+        self,
+        user_goal: str,
+        stage_plan: list[PlannerStage],
+        observation: dict,
+        task_history: list[dict] | None = None,
+        memory_context: str = "",
+    ):
+        self._generate_mode = "current"
         self.calls.append(
             {
                 "user_goal": user_goal,
+                "stage_plan": [stage.to_dict() for stage in stage_plan],
                 "observation": observation,
                 "task_history": list(task_history or []),
                 "memory_context": memory_context,
@@ -216,11 +258,20 @@ class FakePlanner:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"goal={user_goal}; activity={observation['current_activity']}; history={len(task_history or [])}",
+                        "text": f"goal={user_goal}; activity={observation['current_activity']}; history={len(task_history or [])}; stages={len(stage_plan)}",
                     }
                 ],
             },
         ]
+
+    def build_messages(self, user_goal: str, observation: dict, task_history: list[dict] | None = None, memory_context: str = ""):
+        return self.build_current_subtasks_messages(
+            user_goal=user_goal,
+            stage_plan=[],
+            observation=observation,
+            task_history=task_history,
+            memory_context=memory_context,
+        )
 
     @staticmethod
     def extract_user_text_prompt(messages) -> str:
@@ -231,6 +282,13 @@ class FakePlanner:
         return messages
 
     def generate(self, messages, temperature: float = 0.0) -> str:
+        if self._generate_mode == "stage_plan":
+            if not self.stage_plan_results:
+                response = self._default_stage_plan_result()
+            else:
+                response = self.stage_plan_results[0]
+            self._last_response = response.raw_response or '{"stage_plan":[]}'
+            return self._last_response
         if not self.responses:
             raise AssertionError("No planner response queued.")
         response = self.responses[0]
@@ -239,6 +297,14 @@ class FakePlanner:
 
     def parse_response(self, raw_response: str) -> PlannerResult:
         response = self.responses.pop(0)
+        response.raw_response = raw_response
+        return response
+
+    def parse_stage_plan_response(self, raw_response: str) -> StagePlanResult:
+        if self.stage_plan_results:
+            response = self.stage_plan_results.pop(0)
+        else:
+            response = self._default_stage_plan_result()
         response.raw_response = raw_response
         return response
 
@@ -294,6 +360,29 @@ class FakeMemoryProvider(NoOpMemoryProvider):
 
     def reset(self) -> None:
         self.reset_calls += 1
+
+
+class FakeVerifier:
+    def __init__(self, responses: list[dict]) -> None:
+        self.responses = list(responses)
+        self.calls = []
+
+    def run_verification(self, request):
+        from dms_reproduction.agents.verifier import VerifierResult
+
+        self.calls.append(request)
+        if not self.responses:
+            raise AssertionError("No verifier response queued.")
+        payload = self.responses.pop(0)
+        return VerifierResult(
+            status=payload["status"],
+            reason=payload["reason"],
+            memory_eligible=payload.get("memory_eligible", False),
+            raw_response=payload.get("raw_response", '{"status":"stub"}'),
+            parse_error=payload.get("parse_error"),
+            prompt_text="verifier prompt",
+            messages=[{"role": "user", "content": "verifier prompt"}],
+        )
 
 
 class FakeTask:
@@ -408,8 +497,9 @@ class TaskRunnerTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(planner.calls[1]["observation"]["current_activity"], "after-failure/activity")
-        self.assertEqual(len(planner.calls[1]["task_history"]), 1)
-        self.assertEqual(planner.calls[1]["task_history"][0]["source"], "actor")
+        self.assertGreaterEqual(len(planner.calls[1]["task_history"]), 2)
+        self.assertEqual(planner.calls[1]["task_history"][0]["source"], "stage_plan")
+        self.assertTrue(any(item.get("source") == "actor" for item in planner.calls[1]["task_history"]))
 
     def test_actor_error_variants_all_trigger_replan(self) -> None:
         for actor_status in ("parse_error", "execution_error", "step_limit"):
@@ -556,7 +646,7 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertEqual(result.planner_rounds[-1].replan_reason, "suspicious_subtask_completion_without_progress")
         self.assertIn("repeated actor completion", result.completion_message)
 
-    def test_bad_open_app_subtask_is_normalized(self) -> None:
+    def test_bad_open_app_subtask_is_not_contact_specific_rewritten(self) -> None:
         planner = FakePlanner(
             [
                 PlannerResult(
@@ -581,9 +671,9 @@ class TaskRunnerTest(unittest.TestCase):
 
         result = runner.run_task(FakeEnv(), FakeTask([]), "Create a contact")
 
-        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Navigate to the contacts section.")
+        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Click on the Phone app to open it.")
 
-    def test_contact_entry_atomic_goal_is_normalized_to_functional_milestone(self) -> None:
+    def test_contact_entry_atomic_goal_is_not_rewritten_by_runner(self) -> None:
         planner = FakePlanner(
             [
                 PlannerResult(
@@ -610,10 +700,10 @@ class TaskRunnerTest(unittest.TestCase):
 
         self.assertEqual(
             result.planner_rounds[0].normalized_subtasks[0]["goal"],
-            "Reach the contact creation entry point.",
+            "Tap the Create new contact button.",
         )
 
-    def test_contact_editor_field_goal_is_normalized_to_grouped_form_fill(self) -> None:
+    def test_contact_editor_field_goal_is_not_rewritten_by_runner(self) -> None:
         planner = FakePlanner(
             [
                 PlannerResult(
@@ -644,7 +734,7 @@ class TaskRunnerTest(unittest.TestCase):
 
         self.assertEqual(
             result.planner_rounds[0].normalized_subtasks[0]["goal"],
-            "Fill in Sara Khan and +15102899176 in the contact form.",
+            "Enter the first name 'Sara' into the First name field.",
         )
 
     def test_invalid_planner_subtask_marks_round_invalid(self) -> None:
@@ -824,7 +914,7 @@ class TaskRunnerTest(unittest.TestCase):
             "contacts_section_selected",
         )
 
-    def test_open_phone_app_goal_is_normalized_to_contacts_navigation_when_dialer_is_already_open(self) -> None:
+    def test_open_phone_app_goal_is_not_rewritten_when_dialer_is_already_open(self) -> None:
         planner = FakePlanner(
             [
                 PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("None", "Open the Phone app.", "Need to begin contact creation")]),
@@ -848,7 +938,7 @@ class TaskRunnerTest(unittest.TestCase):
 
         result = runner.run_task(FakeEnv(), FakeTask([]), "Create a contact")
 
-        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Navigate to the contacts section.")
+        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Open the Phone app.")
 
     def test_text_entry_goal_is_completed_when_after_observation_contains_value(self) -> None:
         planner = FakePlanner(
@@ -1153,10 +1243,93 @@ class TaskRunnerTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(len(planner.calls), 2)
+        self.assertEqual(len(planner.stage_plan_calls), 1)
         self.assertTrue(
             any(
                 item.get("status") == "planner_complete_but_task_check_failed"
                 for item in planner.calls[1]["task_history"]
+            )
+        )
+        self.assertIn("repair, verification, or progress-making subtask", planner.calls[1]["task_history"][-1].get("summary", ""))
+
+    def test_second_pass_current_stage_id_is_preserved(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    subtasks=[PlannerSubtask("None", "Open the Phone app.", "Need app")],
+                ),
+                PlannerResult(
+                    is_goal_complete=False,
+                    subtasks=[PlannerSubtask("Phone app is open.", "Reach the contact creation entry point.", "Need new contact flow")],
+                    current_stage_id=2,
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "open phone", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_dialer_contacts_observation(),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                ),
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "reach entry", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_observation("after-entry"),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                ),
+            ]
+        )
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3))
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.planner_rounds[1].planner_result["current_stage_id"], 2)
+
+    def test_invalid_second_pass_current_stage_id_replans_instead_of_falling_back(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    subtasks=[PlannerSubtask("None", "Open the Phone app.", "Need app")],
+                ),
+                PlannerResult(
+                    is_goal_complete=False,
+                    subtasks=[PlannerSubtask("Phone app is open.", "Reach the contact creation entry point.", "Need new contact flow")],
+                    current_stage_id=99,
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "open phone", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_dialer_contacts_observation(),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3))
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.planner_rounds[1].replan_reason, "planner_current_stage_invalid")
+        self.assertTrue(
+            any(
+                item.get("status") == "planner_current_stage_invalid"
+                for item in planner.calls[2]["task_history"]
             )
         )
 
@@ -1189,6 +1362,322 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertTrue(planner_history)
         self.assertFalse(any(item.get("status") == "warning" for item in planner_history))
         self.assertEqual(result.status, "completed")
+
+    def test_verifier_success_marks_subtask_completed(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("None", "Open Contacts", "Need app")]),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "done", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_observation("after"),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Contacts is visible.", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        subtask_run = result.planner_rounds[0].subtask_runs[0]
+        self.assertEqual(subtask_run.subtask_verification["status"], "success")
+        self.assertTrue(subtask_run.subtask_verification["memory_eligible"])
+
+    def test_verifier_uncertain_replans_even_if_actor_completed(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("None", "Open Contacts", "Need app")]),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "done", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_observation("after"),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "uncertain", "reason": "Need stronger evidence.", "memory_eligible": False}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.planner_rounds[0].replan_reason, "verifier_uncertain")
+        self.assertEqual(planner.calls[1]["task_history"][0]["source"], "stage_plan")
+        self.assertTrue(any(item.get("source") == "actor" for item in planner.calls[1]["task_history"]))
+
+    def test_verifier_uses_final_frame_when_actor_never_completed(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("None", "Open Contacts", "Need app")]),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        after = build_observation("after")
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="step_limit",
+                    steps=[build_actor_step(0, "tap", ClickAction(3), "progress", False)],
+                    final_observation=after,
+                    completion_message="",
+                    last_action={"action_type": "click", "index": 3},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Final frame shows success.", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(verifier.calls[0].evidence_source, "final_after_observation")
+
+    def test_memory_event_records_verifier_fields(self) -> None:
+        memory = FakeMemoryProvider()
+        planner = FakePlanner(
+            [
+                PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("None", "Open Contacts", "Need app")]),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "done", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_observation("after"),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Verified", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(
+            planner,
+            actor,
+            adapter,
+            verifier=verifier,
+            memory_provider=memory,
+            config=TaskRunConfig(max_planner_rounds=2),
+        )
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        event = memory.recorded_events[0]
+        self.assertEqual(event["verifier_status"], "success")
+        self.assertEqual(event["verifier_reason"], "Verified")
+        self.assertTrue(event["memory_eligible"])
+        self.assertEqual(event["verifier_evidence_source"], "actor_completed_frame")
+
+    def test_stage_plan_is_persisted_into_next_planner_history(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    stage_plan=[
+                        PlannerStage(1, "Open the Phone app", "Phone app is foreground"),
+                        PlannerStage(2, "Reach the contact creation entry point", "Create new contact is visible"),
+                    ],
+                    current_stage_id=2,
+                    subtasks=[PlannerSubtask("None", "Reach the contact creation entry point.", "Need the entry point")],
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "entry reached", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_observation("after"),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Entry is visible.", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(
+            any(item.get("source") == "stage_plan" for item in planner.calls[1]["task_history"])
+        )
+        stage_entry = next(item for item in reversed(planner.calls[1]["task_history"]) if item.get("source") == "stage_plan")
+        self.assertEqual(stage_entry["current_stage_id"], 2)
+        self.assertEqual(len(stage_entry["stage_plan"]), 2)
+
+    def test_contact_stage_plan_is_not_rewritten_by_runner(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    stage_plan=[
+                        PlannerStage(1, "Open the Phone app", "Phone app is foreground"),
+                        PlannerStage(2, "Reach the contact creation entry point", "Create contact UI is visible"),
+                        PlannerStage(3, "Fill in required contact fields", "Required fields are populated"),
+                    ],
+                    current_stage_id=1,
+                    subtasks=[PlannerSubtask("Phone app open", "Navigate to the contacts section.", "Need contacts first")],
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        contact_editor = build_contact_editor_observation()
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "fill fields", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=contact_editor,
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Fields were filled.", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([contact_editor])
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(
+            FakeEnv(),
+            FakeTask([1.0]),
+            "Create a new contact for Sara Khan. their number is +15102899176.",
+        )
+
+        self.assertEqual(result.status, "completed")
+        planner_result = result.planner_rounds[0].planner_result
+        self.assertEqual(planner_result["current_stage_id"], 1)
+        self.assertEqual(len(planner_result["stage_plan"]), 3)
+        self.assertEqual(planner_result["subtasks"][0]["goal"], "Navigate to the contacts section.")
+        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Navigate to the contacts section.")
+
+    def test_contact_stage_one_subtask_is_not_promoted_to_entry_point_from_reason_only(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    stage_plan=[
+                        PlannerStage(1, "Open the Phone app", "Phone app is foreground"),
+                        PlannerStage(2, "Reach the contact creation entry point", "Create new contact is visible"),
+                        PlannerStage(3, "Fill in required contact fields", "Required fields are populated"),
+                        PlannerStage(4, "Save and verify the created contact", "Saved contact matches the request"),
+                    ],
+                    current_stage_id=1,
+                    subtasks=[PlannerSubtask("None", "Open the Phone app.", "The Phone app must be open before contact creation can continue.")],
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        launcher_observation = build_observation("initial")
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "open app", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=launcher_observation,
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "The app was opened.", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([launcher_observation])
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(
+            FakeEnv(),
+            FakeTask([1.0]),
+            "Create a new contact for Sara Khan. their number is +15102899176.",
+        )
+
+        self.assertEqual(result.planner_rounds[0].planner_result["current_stage_id"], 1)
+        self.assertEqual(result.planner_rounds[0].planner_result["subtasks"][0]["goal"], "Open the Phone app.")
+        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Open the Phone app.")
+
+    def test_contact_observation_with_creation_entry_does_not_force_stage_two_planner_result(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    stage_plan=[PlannerStage(1, "Reach the contact creation entry point", "Contact creation entry point is visible")],
+                    current_stage_id=1,
+                    subtasks=[PlannerSubtask("None", "Reach the contact creation entry point.", "The create new contact option is visible.")],
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        dialer_contacts = build_dialer_contacts_observation()
+        dialer_contacts["ui_elements"] = [
+            {
+                "index": 0,
+                "text": "Create new contact",
+                "content_description": "",
+                "resource_name": "com.google.android.dialer:id/empty_content_view_action",
+                "is_clickable": True,
+                "is_editable": False,
+                "raw": {"is_selected": False},
+            },
+            {
+                "index": 1,
+                "text": "",
+                "content_description": "Contacts",
+                "resource_name": "com.google.android.dialer:id/tab_contacts",
+                "is_clickable": False,
+                "is_editable": False,
+                "raw": {"is_selected": True},
+            },
+        ]
+        dialer_contacts["ui_description"] = "UI element 0: text='Create new contact'; UI element 1: content_description='Contacts'"
+        dialer_contacts["valid_ui_indices"] = [0, 1]
+        dialer_contacts["visible_ui_count"] = 2
+        dialer_contacts["clickable_ui_count"] = 1
+        dialer_contacts["non_system_ui_count"] = 2
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "entry reached", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=dialer_contacts,
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Entry is visible.", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([dialer_contacts])
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(
+            FakeEnv(),
+            FakeTask([1.0]),
+            "Create a new contact for Sara Khan. their number is +15102899176.",
+        )
+
+        self.assertEqual(result.planner_rounds[0].planner_result["current_stage_id"], 1)
+        self.assertEqual(result.planner_rounds[0].planner_result["subtasks"][0]["goal"], "Reach the contact creation entry point.")
+        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Reach the contact creation entry point.")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,10 @@ class MemoryEvent:
     subtask: str
     status: str
     summary: str
+    verifier_status: str
+    verifier_reason: str
+    memory_eligible: bool
+    verifier_evidence_source: str
     success_check: Dict[str, Any]
     observation_digest: Dict[str, Any]
 

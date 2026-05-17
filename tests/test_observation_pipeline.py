@@ -41,6 +41,7 @@ class FakeUIElement:
     is_scrollable: bool | None = None
     is_visible: bool | None = None
     package_name: str | None = None
+    is_selected: bool | None = None
 
 
 @dataclass
@@ -83,6 +84,22 @@ class FakeEnv:
 
     def get_state(self, wait_to_stabilize: bool = False) -> FakeState:
         self.wait_to_stabilize = wait_to_stabilize
+        return self._state
+
+
+class SequencedFakeEnv(FakeEnv):
+    def __init__(self, states: list[FakeState], activity: str) -> None:
+        super().__init__()
+        self._states = list(states)
+        self.foreground_activity_name = activity
+        self._state = self._states[0]
+        self._call_count = 0
+
+    def get_state(self, wait_to_stabilize: bool = False) -> FakeState:
+        self.wait_to_stabilize = wait_to_stabilize
+        index = min(self._call_count, len(self._states) - 1)
+        self._state = self._states[index]
+        self._call_count += 1
         return self._state
 
 
@@ -286,6 +303,15 @@ class AndroidWorldObservationAdapterTest(unittest.TestCase):
                     is_visible=True,
                     package_name="com.google.android.inputmethod.latin",
                 ),
+                FakeUIElement(
+                    text="w",
+                    class_name="android.widget.Button",
+                    bbox_pixels=FakeBBox(45, 200, 75, 240),
+                    is_clickable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.inputmethod.latin",
+                ),
             ],
         )
         adapter = AndroidWorldObservationAdapter(max_ui_elements=50, max_resample_attempts=0, resample_delay_seconds=0.0)
@@ -300,6 +326,107 @@ class AndroidWorldObservationAdapterTest(unittest.TestCase):
         self.assertTrue(observation["keyboard_active_context"])
         self.assertEqual(observation["observation_consistency"], "stable")
         self.assertIn("Soft keyboard is active", observation["observation_warning"] or "")
+
+    @patch("dms_reproduction.envs.observation_utils.Image.fromarray")
+    @patch("dms_reproduction.envs.android_world_adapter.Image.fromarray")
+    def test_capture_observation_resamples_when_selected_tab_snapshot_changes(
+        self,
+        adapter_fromarray,
+        utils_fromarray,
+    ) -> None:
+        adapter_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        utils_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        stale_voicemail_state = FakeState(
+            pixels=object(),
+            ui_elements=[
+                FakeUIElement(
+                    content_description="Contacts",
+                    resource_name="com.google.android.dialer:id/tab_contacts",
+                    class_name="android.widget.FrameLayout",
+                    bbox_pixels=FakeBBox(0, 300, 50, 340),
+                    is_clickable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.dialer",
+                ),
+                FakeUIElement(
+                    content_description="Voicemail",
+                    resource_name="com.google.android.dialer:id/tab_voicemail",
+                    class_name="android.widget.FrameLayout",
+                    bbox_pixels=FakeBBox(50, 300, 100, 340),
+                    is_clickable=False,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.dialer",
+                ),
+                FakeUIElement(
+                    text="You don't have any voicemail messages yet",
+                    resource_name="com.google.android.dialer:id/empty_content_view_message",
+                    class_name="android.widget.TextView",
+                    bbox_pixels=FakeBBox(10, 120, 180, 170),
+                    is_clickable=False,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.dialer",
+                ),
+            ],
+        )
+        stale_voicemail_state.ui_elements[1].is_visible = True
+        stale_voicemail_state.ui_elements[1].is_selected = True
+        correct_contacts_state = FakeState(
+            pixels=object(),
+            ui_elements=[
+                FakeUIElement(
+                    content_description="Contacts",
+                    resource_name="com.google.android.dialer:id/tab_contacts",
+                    class_name="android.widget.FrameLayout",
+                    bbox_pixels=FakeBBox(0, 300, 50, 340),
+                    is_clickable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.dialer",
+                ),
+                FakeUIElement(
+                    content_description="Voicemail",
+                    resource_name="com.google.android.dialer:id/tab_voicemail",
+                    class_name="android.widget.FrameLayout",
+                    bbox_pixels=FakeBBox(50, 300, 100, 340),
+                    is_clickable=False,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.dialer",
+                ),
+                FakeUIElement(
+                    text="Create new contact",
+                    resource_name="com.google.android.dialer:id/new_contact",
+                    class_name="android.widget.TextView",
+                    bbox_pixels=FakeBBox(10, 120, 180, 170),
+                    is_clickable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.google.android.dialer",
+                ),
+            ],
+        )
+        correct_contacts_state.ui_elements[0].is_selected = True
+        env = SequencedFakeEnv(
+            [stale_voicemail_state, correct_contacts_state, correct_contacts_state],
+            "com.google.android.dialer/.DialtactsActivity",
+        )
+        adapter = AndroidWorldObservationAdapter(max_ui_elements=50, max_resample_attempts=2, resample_delay_seconds=0.0)
+
+        observation = adapter.capture_observation(
+            env,
+            goal="Add a contact",
+            step_id=1,
+            include_screenshots=True,
+        )
+
+        self.assertEqual(observation["observation_consistency"], "stable")
+        self.assertEqual(observation["extra_state"]["observation_attempt"], 3)
+        self.assertTrue(observation["extra_state"]["observation_resampled"])
+        self.assertIn("Create new contact", observation["ui_description"])
+        self.assertNotIn("voicemail messages yet", observation["ui_description"])
 
 
 if __name__ == "__main__":

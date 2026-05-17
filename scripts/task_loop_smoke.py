@@ -16,8 +16,9 @@ if VENDOR_DIR.exists() and str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
 
 from dms_reproduction.agents.android_actor import ActorConfig, AndroidActor
-from dms_reproduction.agents.planner import AndroidTaskPlanner, PlannerConfig
+from dms_reproduction.agents.planner import AndroidTaskPlanner, PlannerConfig, extract_json_object
 from dms_reproduction.agents.task_runner import AndroidTaskRunner, TaskRunConfig
+from dms_reproduction.agents.verifier import AndroidVerifier, VerifierConfig
 from dms_reproduction.envs.android_world_adapter import AndroidWorldObservationAdapter
 from dms_reproduction.envs.observation_utils import save_base64_png
 from dms_reproduction.llm.base_client import OpenAICompatibleConfig
@@ -147,6 +148,7 @@ def observation_summary_lines(observation: dict[str, Any] | None) -> list[str]:
 def build_subtask_summary(subtask_run: dict[str, Any]) -> str:
     actor_result = subtask_run["actor_result"]
     success_check = subtask_run.get("subtask_success_check") or {}
+    verification = subtask_run.get("subtask_verification") or {}
     form_fill_progress = success_check.get("form_fill_progress") or {}
     lines = [
         "# Subtask Summary",
@@ -154,8 +156,10 @@ def build_subtask_summary(subtask_run: dict[str, Any]) -> str:
         f"- Subtask: {subtask_run['subtask'].get('precondition', '')} -> {subtask_run['subtask'].get('goal', '')}",
         f"- Actor status: {actor_result.get('status')}",
         f"- Completion message: {actor_result.get('completion_message') or 'None'}",
-        f"- Runner success override: {success_check.get('runner_overrode_to_completed', False)}",
-        f"- Success rule: {success_check.get('success_rule') or 'None'}",
+        f"- Rule-based evidence: {success_check.get('success_rule') or 'None'}",
+        f"- Verifier status: {verification.get('status') or 'None'}",
+        f"- Verifier reason: {verification.get('reason') or 'None'}",
+        f"- Memory eligible: {verification.get('memory_eligible') if verification else 'None'}",
         f"- Final warning: {(subtask_run.get('post_observation') or {}).get('observation_warning') or 'None'}",
         f"- Text entry success detected: {str((success_check.get('success_rule') or '')).startswith('text_entry_')}",
         "",
@@ -231,8 +235,42 @@ def build_actor_decision_summary(subtask_text: str, step: dict[str, Any]) -> str
     return "\n".join(lines)
 
 
+def analyze_raw_planner_output(round_record: dict[str, Any]) -> dict[str, Any]:
+    raw_response = str(round_record.get("planner_raw_response") or "")
+    payload = extract_json_object(raw_response) or {}
+    tasks = payload.get("tasks") or payload.get("task_assignments") or []
+    task_texts = [str(task.get("task") or "") for task in tasks if isinstance(task, dict)]
+    combined_task_text = " ".join(task_texts).lower()
+    atomic_markers = (
+        "click ",
+        "tap ",
+        "press ",
+        "enter the first name",
+        "enter the last name",
+        "enter the phone number",
+        "first name field",
+        "last name field",
+        "phone field",
+        "contacts tab",
+        "create new contact button",
+    )
+    return {
+        "tool": payload.get("tool"),
+        "raw_stage_plan_depth": len(payload.get("stage_plan") or []) if isinstance(payload.get("stage_plan"), list) else 0,
+        "raw_current_stage_id": payload.get("current_stage_id"),
+        "raw_task_count": len(task_texts),
+        "raw_subtask_is_atomic_ui_action": any(marker in combined_task_text for marker in atomic_markers),
+        "raw_subtask_is_grouped_form_fill": " in the contact form" in combined_task_text and "fill in " in combined_task_text,
+        "raw_complete_goal_declared": payload.get("tool") == "complete_goal",
+        "raw_tasks": task_texts,
+    }
+
+
 def build_round_summary(round_record: dict[str, Any]) -> str:
     planner_result = round_record["planner_result"]
+    stage_plan = planner_result.get("stage_plan") or []
+    current_stage_id = planner_result.get("current_stage_id")
+    raw_quality = analyze_raw_planner_output(round_record)
     lines = [
         "# Round Summary",
         "",
@@ -241,10 +279,41 @@ def build_round_summary(round_record: dict[str, Any]) -> str:
         "",
         "## Planner Output",
     ]
+    lines.extend(
+        [
+            f"- Raw tool: {raw_quality.get('tool') or 'Unknown'}",
+            f"- Raw stage plan depth: {raw_quality.get('raw_stage_plan_depth')}",
+            f"- Raw current stage id: {raw_quality.get('raw_current_stage_id')}",
+            f"- Raw task count: {raw_quality.get('raw_task_count')}",
+            f"- Raw atomic UI action: {raw_quality.get('raw_subtask_is_atomic_ui_action')}",
+            f"- Raw grouped form fill: {raw_quality.get('raw_subtask_is_grouped_form_fill')}",
+            f"- Raw complete_goal declared: {raw_quality.get('raw_complete_goal_declared')}",
+        ]
+    )
     normalized_subtasks = round_record.get("normalized_subtasks") or []
+    if stage_plan:
+        current_stage = next((stage for stage in stage_plan if stage.get("stage_id") == current_stage_id), None)
+        lines.extend(
+            [
+                f"- Stage count: {len(stage_plan)}",
+                f"- Current stage: {current_stage_id if current_stage_id is not None else 'Unknown'}"
+                f"{' - ' + str(current_stage.get('title')) if current_stage else ''}",
+            ]
+        )
+        for stage in stage_plan:
+            lines.append(
+                f"  - Stage {stage.get('stage_id')}: {stage.get('title')} "
+                f"(success signal: {stage.get('success_signal')})"
+            )
     if planner_result.get("is_goal_complete"):
         lines.append(f"- Planner declared goal complete: {planner_result.get('completion_message') or 'None'}")
     else:
+        if planner_result.get("parse_error"):
+            parse_error_code = planner_result.get("parse_error_code")
+            parse_error_label = f" [{parse_error_code}]" if parse_error_code else ""
+            lines.append(
+                f"- Planner parse error{parse_error_label}: {planner_result.get('parse_error')}"
+            )
         subtasks = planner_result.get("subtasks") or []
         if not subtasks:
             lines.append("- Planner returned no subtasks.")
@@ -327,9 +396,25 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
         f"- Completion message: {run_result.get('completion_message') or 'None'}",
         f"- Planner rounds: {len(run_result.get('planner_rounds', []))}",
         f"- Total actor steps: {run_result.get('total_actor_steps', 0)}",
+        f"- Stage plan revisions: {len(run_result.get('stage_plan_revisions') or [])}",
         "",
-        "## Round Highlights",
+        "## Initial Stage Plan",
     ]
+    initial_stage_plan = ((run_result.get("initial_stage_plan") or {}).get("stage_plan_result") or {}).get("stage_plan") or []
+    if initial_stage_plan:
+        for stage in initial_stage_plan:
+            lines.append(
+                f"- Stage {stage.get('stage_id')}: {stage.get('title')} "
+                f"(success signal: {stage.get('success_signal')})"
+            )
+    else:
+        lines.append("- None")
+    lines.extend(
+        [
+            "",
+        "## Round Highlights",
+        ]
+    )
     for round_record in run_result.get("planner_rounds", []):
         lines.append(
             f"- Round {round_record['round_id']}: "
@@ -363,6 +448,7 @@ def build_light_run_result(run_result: dict[str, Any], artifact_index: dict[str,
         "total_actor_steps": run_result.get("total_actor_steps"),
         "completion_message": run_result.get("completion_message"),
         "planner_round_count": len(run_result.get("planner_rounds", [])),
+        "stage_plan_revision_count": len(run_result.get("stage_plan_revisions") or []),
         "artifact_index": artifact_index,
     }
 
@@ -392,6 +478,12 @@ def write_round_artifacts(run_dir: Path, round_record: dict[str, Any]) -> dict[s
     save_text(round_dir / "planner_prompt.txt", round_record["planner_prompt"])
     save_text(round_dir / "planner_raw_response.txt", round_record["planner_raw_response"])
     save_json(round_dir / "planner_result.json", round_record["planner_result"])
+    save_json(round_dir / "planner_raw_quality.json", analyze_raw_planner_output(round_record))
+    save_json(round_dir / "planner_stage_plan.json", round_record["planner_result"].get("stage_plan") or [])
+    save_json(
+        round_dir / "planner_current_stage.json",
+        {"current_stage_id": round_record["planner_result"].get("current_stage_id")},
+    )
     save_json(
         round_dir / "planner_parse_repair.json",
         round_record.get("planner_parse_repair") or {},
@@ -432,6 +524,9 @@ def write_round_artifacts(run_dir: Path, round_record: dict[str, Any]) -> dict[s
             "planner_prompt": str(round_dir / "planner_prompt.txt"),
             "planner_raw_response": str(round_dir / "planner_raw_response.txt"),
             "planner_result": str(round_dir / "planner_result.json"),
+            "planner_raw_quality": str(round_dir / "planner_raw_quality.json"),
+            "planner_stage_plan": str(round_dir / "planner_stage_plan.json"),
+            "planner_current_stage": str(round_dir / "planner_current_stage.json"),
             "planner_parse_repair": str(round_dir / "planner_parse_repair.json"),
             "planner_subtasks_normalized": str(round_dir / "planner_subtasks_normalized.json"),
             "observation_consistency_report": str(round_dir / "observation_consistency_report.json"),
@@ -447,8 +542,13 @@ def write_round_artifacts(run_dir: Path, round_record: dict[str, Any]) -> dict[s
         subtask_dir = round_dir / f"subtask_{subtask_index:02d}"
         subtask_dir.mkdir(parents=True, exist_ok=True)
         actor_result = subtask_run["actor_result"]
+        verifier_result = subtask_run.get("subtask_verification") or {}
         save_json(subtask_dir / "actor_result.json", actor_result)
         save_json(subtask_dir / "subtask_success_check.json", subtask_run.get("subtask_success_check") or {})
+        save_json(subtask_dir / "verifier_result.json", verifier_result)
+        save_json(subtask_dir / "verifier_messages.json", verifier_result.get("messages") or [])
+        save_text(subtask_dir / "verifier_prompt.txt", verifier_result.get("prompt_text") or "")
+        save_text(subtask_dir / "verifier_raw_response.txt", verifier_result.get("raw_response") or "")
         save_json(subtask_dir / "form_fill_progress.json", (subtask_run.get("subtask_success_check") or {}).get("form_fill_progress") or {})
         save_json(
             subtask_dir / "actor_action_normalization.json",
@@ -472,6 +572,10 @@ def write_round_artifacts(run_dir: Path, round_record: dict[str, Any]) -> dict[s
             "subtask_dir": str(subtask_dir),
             "actor_result": str(subtask_dir / "actor_result.json"),
             "subtask_success_check": str(subtask_dir / "subtask_success_check.json"),
+            "verifier_result": str(subtask_dir / "verifier_result.json"),
+            "verifier_messages": str(subtask_dir / "verifier_messages.json"),
+            "verifier_prompt": str(subtask_dir / "verifier_prompt.txt"),
+            "verifier_raw_response": str(subtask_dir / "verifier_raw_response.txt"),
             "form_fill_progress": str(subtask_dir / "form_fill_progress.json"),
             "actor_action_normalization": str(subtask_dir / "actor_action_normalization.json"),
             "subtask_summary": str(subtask_dir / "subtask_summary.md"),
@@ -509,6 +613,19 @@ def write_round_artifacts(run_dir: Path, round_record: dict[str, Any]) -> dict[s
             subtask_index_entry["steps"].append(step_entry)
         round_index["subtasks"].append(subtask_index_entry)
     return round_index
+
+
+def write_initial_stage_plan_artifacts(run_dir: Path, initial_stage_plan_record: dict[str, Any]) -> dict[str, Any]:
+    save_json(run_dir / "initial_stage_plan.json", initial_stage_plan_record.get("stage_plan_result") or {})
+    save_json(run_dir / "initial_stage_plan_messages.json", initial_stage_plan_record.get("planner_messages") or [])
+    save_text(run_dir / "initial_stage_plan_prompt.txt", initial_stage_plan_record.get("planner_prompt") or "")
+    save_text(run_dir / "initial_stage_plan_raw_response.txt", initial_stage_plan_record.get("planner_raw_response") or "")
+    return {
+        "initial_stage_plan": str(run_dir / "initial_stage_plan.json"),
+        "initial_stage_plan_messages": str(run_dir / "initial_stage_plan_messages.json"),
+        "initial_stage_plan_prompt": str(run_dir / "initial_stage_plan_prompt.txt"),
+        "initial_stage_plan_raw_response": str(run_dir / "initial_stage_plan_raw_response.txt"),
+    }
 
 def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = make_run_dir(args.output_dir, args.task)
@@ -548,10 +665,17 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                 prompt_profile=args.prompt_profile,
             ),
         )
+        verifier = AndroidVerifier(
+            llm_client,
+            VerifierConfig(
+                temperature=args.temperature,
+            ),
+        )
         adapter = AndroidWorldObservationAdapter(max_ui_elements=args.max_ui_elements)
         runner = AndroidTaskRunner(
             planner=planner,
             actor=actor,
+            verifier=verifier,
             observation_adapter=adapter,
             config=TaskRunConfig(
                 max_planner_rounds=args.max_planner_rounds,
@@ -564,7 +688,28 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         meta["planner_call_seconds_total"] = round(time.time() - start_time, 3)
 
         run_result_dict = run_result.to_dict()
-        artifact_index = {"rounds": []}
+        artifact_index = {"initial_stage_plan": {}, "stage_plan_revisions": [], "rounds": []}
+        artifact_index["initial_stage_plan"] = write_initial_stage_plan_artifacts(
+            run_dir,
+            run_result_dict.get("initial_stage_plan") or {},
+        )
+        for revision_index, stage_plan_revision in enumerate(run_result_dict.get("stage_plan_revisions") or [], start=1):
+            revision_dir = run_dir / f"stage_plan_revision_{revision_index:02d}"
+            revision_dir.mkdir(parents=True, exist_ok=True)
+            save_json(revision_dir / "stage_plan_result.json", stage_plan_revision.get("stage_plan_result") or {})
+            save_json(revision_dir / "planner_messages.json", stage_plan_revision.get("planner_messages") or [])
+            save_text(revision_dir / "planner_prompt.txt", stage_plan_revision.get("planner_prompt") or "")
+            save_text(revision_dir / "planner_raw_response.txt", stage_plan_revision.get("planner_raw_response") or "")
+            save_json(revision_dir / "revision_meta.json", {"revision_reason": stage_plan_revision.get("revision_reason")})
+            artifact_index["stage_plan_revisions"].append(
+                {
+                    "stage_plan_result": str(revision_dir / "stage_plan_result.json"),
+                    "planner_messages": str(revision_dir / "planner_messages.json"),
+                    "planner_prompt": str(revision_dir / "planner_prompt.txt"),
+                    "planner_raw_response": str(revision_dir / "planner_raw_response.txt"),
+                    "revision_meta": str(revision_dir / "revision_meta.json"),
+                }
+            )
         for round_record in run_result_dict["planner_rounds"]:
             artifact_index["rounds"].append(write_round_artifacts(run_dir, round_record))
         save_json(run_dir / "artifact_index.json", artifact_index)

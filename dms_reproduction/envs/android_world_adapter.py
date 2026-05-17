@@ -43,6 +43,7 @@ class AndroidWorldObservationAdapter:
     ) -> dict[str, Any]:
         attempts = 0
         last_observation: dict[str, Any] | None = None
+        previous_stable_observation: dict[str, Any] | None = None
         while True:
             attempts += 1
             last_observation = self._capture_once(
@@ -53,8 +54,39 @@ class AndroidWorldObservationAdapter:
                 attempt=attempts,
             )
             if last_observation["observation_consistency"] == "stable":
-                return last_observation
+                if (
+                    previous_stable_observation is not None
+                    and self._observations_match(previous_stable_observation, last_observation)
+                ):
+                    return last_observation
+                if self._needs_stability_confirmation(last_observation):
+                    previous_stable_observation = last_observation
+                else:
+                    return last_observation
+            else:
+                previous_stable_observation = None
             if attempts > self.max_resample_attempts:
+                if (
+                    previous_stable_observation is not None
+                    and last_observation["observation_consistency"] == "stable"
+                    and not self._observations_match(previous_stable_observation, last_observation)
+                ):
+                    notes = list(last_observation.get("unstable_reasons") or [])
+                    notes.append(
+                        "Consecutive stable captures disagreed; likely stale or mismatched UI tree."
+                    )
+                    last_observation["observation_consistency"] = "unstable"
+                    last_observation["unstable_reasons"] = notes
+                    last_observation["observation_warning"] = self._build_observation_warning(
+                        foreground_package=last_observation.get("foreground_package"),
+                        dominant_ui_package=last_observation.get("app_name"),
+                        visible_ui_count=int(last_observation.get("visible_ui_count") or 0),
+                        clickable_ui_count=int(last_observation.get("clickable_ui_count") or 0),
+                        non_system_ui_count=int(last_observation.get("non_system_ui_count") or 0),
+                        consistency_notes=notes,
+                        observation_consistency="unstable",
+                        keyboard_active_context=bool(last_observation.get("keyboard_active_context")),
+                    )
                 return last_observation
             time.sleep(self.resample_delay_seconds)
 
@@ -267,4 +299,53 @@ class AndroidWorldObservationAdapter:
             and foreground_package not in IME_PACKAGES
             and dominant_ui_package in IME_PACKAGES
             and editable_ui_count > 0
+        )
+
+    @staticmethod
+    def _needs_stability_confirmation(observation: dict[str, Any]) -> bool:
+        ui_elements = observation.get("ui_elements") or []
+        for element in ui_elements:
+            raw = element.get("raw") or {}
+            resource_name = str(element.get("resource_name") or "")
+            content_description = str(element.get("content_description") or "")
+            if raw.get("is_selected"):
+                return True
+            if "tab_" in resource_name:
+                return True
+            if content_description.lower() in {"favorites", "recents", "contacts", "voicemail"}:
+                return True
+        return False
+
+    @staticmethod
+    def _observations_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        return AndroidWorldObservationAdapter._observation_signature(
+            left
+        ) == AndroidWorldObservationAdapter._observation_signature(right)
+
+    @staticmethod
+    def _observation_signature(observation: dict[str, Any]) -> tuple[Any, ...]:
+        ui_elements = observation.get("ui_elements") or []
+        normalized_elements: list[tuple[Any, ...]] = []
+        for element in ui_elements[:15]:
+            raw = element.get("raw") or {}
+            bbox = tuple(element.get("bbox") or ())
+            normalized_elements.append(
+                (
+                    element.get("index"),
+                    element.get("resource_name"),
+                    element.get("text"),
+                    element.get("content_description"),
+                    element.get("class_name"),
+                    bbox,
+                    bool(raw.get("is_selected")),
+                    bool(element.get("is_clickable")),
+                    bool(element.get("is_editable")),
+                    element.get("package_name"),
+                )
+            )
+        return (
+            observation.get("foreground_package"),
+            observation.get("app_name"),
+            observation.get("current_activity"),
+            tuple(normalized_elements),
         )
