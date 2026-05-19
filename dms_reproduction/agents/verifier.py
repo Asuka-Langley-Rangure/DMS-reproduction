@@ -110,10 +110,16 @@ class AndroidVerifier:
             )
         try:
             status = _parse_verifier_status(parsed)
+            reason = str(parsed.get("reason", "")).strip() or "No verifier reason provided."
+            status, reason = self._apply_local_verification_vetoes(
+                request=request,
+                status=status,
+                reason=reason,
+            )
             memory_eligible = _derive_memory_eligible(parsed, status)
             return VerifierResult(
                 status=status,
-                reason=str(parsed.get("reason", "")).strip() or "No verifier reason provided.",
+                reason=reason,
                 memory_eligible=memory_eligible,
                 raw_response=raw_response,
                 parse_error=None,
@@ -289,6 +295,35 @@ class AndroidVerifier:
             return text
         return text[: max_chars - 20] + "\n...[truncated]"
 
+    def _apply_local_verification_vetoes(
+        self,
+        *,
+        request: VerifierRequest,
+        status: VerifierStatus,
+        reason: str,
+    ) -> tuple[VerifierStatus, str]:
+        if status != "success":
+            return status, reason
+
+        goal_type = _classify_subtask_goal(request.subtask)
+        evidence_observation = request.evidence_observation or {}
+        if goal_type == "app_launch" and _should_veto_app_launch_success(request, evidence_observation):
+            return (
+                "failure",
+                "Execution history does not show a real app launch and the final observation still does not show the target app in foreground.",
+            )
+        if goal_type == "navigation" and _should_veto_navigation_success(request, evidence_observation):
+            return (
+                "failure",
+                "The target entry is visible, but there is no post-action evidence that the requested destination or section was actually reached.",
+            )
+        if goal_type == "toggle" and _should_veto_toggle_success(request, evidence_observation):
+            return (
+                "failure",
+                "The control was acted on, but the final observation does not show reliable evidence that the requested control state actually changed.",
+            )
+        return status, reason
+
 
 def _parse_status(value: Any) -> VerifierStatus:
     status = str(value or "").strip().lower()
@@ -309,9 +344,156 @@ def _parse_verifier_status(parsed: Dict[str, Any]) -> VerifierStatus:
 
 
 def _derive_memory_eligible(parsed: Dict[str, Any], status: VerifierStatus) -> bool:
+    if status != "success":
+        return False
     if "memory_eligible" in parsed:
         return bool(parsed.get("memory_eligible"))
     return status == "success"
+
+
+def _classify_subtask_goal(subtask: str) -> str:
+    parsed = _parse_subtask_goal_text(subtask)
+    lowered = parsed.lower()
+    if re.search(r"\b(open|launch)\b.+\bapp\b", lowered):
+        return "app_launch"
+    if re.search(r"\b(turn off|turn on|toggle|switch off|switch on|enable|disable)\b", lowered):
+        return "toggle"
+    if re.search(r"\b(navigate|go to|open|access|reach|enter|switch to|click on)\b", lowered):
+        return "navigation"
+    if re.search(r"\b(type|enter|fill|input)\b", lowered):
+        return "form_fill"
+    if re.search(r"\b(save|submit|confirm)\b", lowered):
+        return "submit"
+    if re.search(r"\b(answer|report|tell|say)\b", lowered):
+        return "qa"
+    return "other"
+
+
+def _parse_subtask_goal_text(subtask: str) -> str:
+    match = re.search(r"Goal\s*:\s*(.+)$", subtask, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return str(subtask or "").strip()
+
+
+def _extract_goal_app_name(subtask: str) -> str | None:
+    goal = _parse_subtask_goal_text(subtask)
+    match = re.search(r"\b(?:open|launch)\s+the\s+(.+?)\s+app\b", goal, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return re.sub(r"\s+", " ", match.group(1).strip().lower())
+
+
+def _should_veto_app_launch_success(request: VerifierRequest, evidence_observation: Dict[str, Any]) -> bool:
+    target_app = _extract_goal_app_name(request.subtask)
+    if target_app is None:
+        return False
+    final_foreground = str(evidence_observation.get("foreground_package") or "").lower()
+    final_app_name = str(evidence_observation.get("app_name") or "").lower()
+    if target_app in final_foreground or target_app in final_app_name:
+        return False
+    if _history_contains_app_launch_evidence(request.action_history, target_app):
+        return False
+    return _history_is_non_progress_only(request.action_history)
+
+
+def _history_contains_app_launch_evidence(action_history: List[Dict[str, Any]], target_app: str) -> bool:
+    for item in action_history:
+        action = item.get("action") or {}
+        action_type = str(action.get("action_type") or "").strip().lower()
+        app_name = str(action.get("app_name") or "").strip().lower()
+        if action_type == "open_app" and target_app in app_name:
+            return True
+        summary = str(item.get("summary") or "").lower()
+        reason = str(item.get("reason") or "").lower()
+        if target_app in summary and re.search(r"\b(open|launch)\b", summary):
+            return True
+        if target_app in reason and re.search(r"\b(open|launch)\b", reason):
+            return True
+    return False
+
+
+def _history_is_non_progress_only(action_history: List[Dict[str, Any]]) -> bool:
+    if not action_history:
+        return True
+    for item in action_history:
+        action = item.get("action") or {}
+        action_type = str(action.get("action_type") or "").strip().lower()
+        if action_type and action_type not in {"wait"}:
+            return False
+        if str(item.get("error") or "").strip():
+            return False
+    return True
+
+
+def _should_veto_navigation_success(request: VerifierRequest, evidence_observation: Dict[str, Any]) -> bool:
+    before = request.before_observation or {}
+    before_activity = str(before.get("current_activity") or "")
+    after_activity = str(evidence_observation.get("current_activity") or "")
+    before_foreground = str(before.get("foreground_package") or "")
+    after_foreground = str(evidence_observation.get("foreground_package") or "")
+    if before_activity != after_activity or before_foreground != after_foreground:
+        return False
+    if any(str(item.get("error") or "").strip() for item in request.action_history):
+        return True
+    if _history_is_non_progress_only(request.action_history):
+        return True
+    return _goal_target_still_only_visible(request.subtask, before, evidence_observation)
+
+
+def _goal_target_still_only_visible(subtask: str, before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+    goal = _parse_subtask_goal_text(subtask)
+    quoted = re.search(r"'([^']+)'|\"([^\"]+)\"", goal)
+    target = quoted.group(1) if quoted and quoted.group(1) else quoted.group(2) if quoted else None
+    if not target:
+        for marker in ("to ", "into ", "on ", "the "):
+            if marker in goal.lower():
+                target = goal.split(marker, 1)[-1].strip(" .")
+                break
+    if not target:
+        return False
+    before_desc = str(before.get("ui_description") or "").lower()
+    after_desc = str(after.get("ui_description") or "").lower()
+    target_lower = target.lower()
+    return target_lower in before_desc and target_lower in after_desc
+
+
+def _should_veto_toggle_success(request: VerifierRequest, evidence_observation: Dict[str, Any]) -> bool:
+    before = request.before_observation or {}
+    if _has_toggle_state_change(before, evidence_observation):
+        return False
+    return True
+
+
+def _has_toggle_state_change(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+    before_states = _collect_checkable_states(before)
+    after_states = _collect_checkable_states(after)
+    if not before_states or not after_states:
+        return False
+    for key, before_checked in before_states.items():
+        after_checked = after_states.get(key)
+        if after_checked is None:
+            continue
+        if before_checked != after_checked:
+            return True
+    return False
+
+
+def _collect_checkable_states(observation: Dict[str, Any]) -> Dict[tuple[str, str, str, str], bool]:
+    ui_elements = observation.get("ui_elements") or []
+    states: Dict[tuple[str, str, str, str], bool] = {}
+    for element in ui_elements:
+        raw = element.get("raw") or {}
+        if raw.get("is_checked") is None:
+            continue
+        key = (
+            str(element.get("class_name") or ""),
+            str(element.get("resource_name") or ""),
+            str(element.get("content_description") or ""),
+            str(element.get("text") or ""),
+        )
+        states[key] = bool(raw.get("is_checked"))
+    return states
 
 
 def extract_json_object(text: str) -> Optional[dict]:

@@ -111,10 +111,12 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertIn("Use task history to avoid repeating failed or no-progress strategies", user_prompt)
         self.assertIn("Then choose the earliest existing stage that is not yet directly satisfied", user_prompt)
         self.assertIn("Use the frozen stage plan when choosing current_stage_id", user_prompt)
-        self.assertIn("Default to one main subtask", user_prompt)
+        self.assertIn("return exactly one current subtask", user_prompt.lower())
         self.assertIn("Ensure current_stage_id and the returned tasks describe the same milestone", user_prompt)
         self.assertIn('"tool":"set_tasks","current_stage_id":1', user_prompt)
-        self.assertIn("covered_stage_ids", user_prompt)
+        self.assertIn("The Precondition must describe the current observable state BEFORE the Actor starts this subtask.", user_prompt)
+        self.assertIn("It must be true in the current observation.", user_prompt)
+        self.assertIn("Do not write a precondition that will only become true after completing an earlier stage.", user_prompt)
         self.assertIn("Do not return duplicate or near-duplicate tasks", user_prompt)
         self.assertIn("rewrite it as the milestone state", user_prompt)
         self.assertIn("planner_complete_but_task_check_failed", user_prompt)
@@ -122,6 +124,7 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertNotIn("Mia Garcia", system_prompt)
         self.assertNotIn("contact creation entry point", user_prompt.lower())
         self.assertNotIn("Available Specialized Agents", user_prompt)
+        self.assertNotIn("covered_stage_ids", user_prompt)
         image_items = extract_image_items(llm.messages)
         self.assertEqual(len(image_items), 1)
         self.assertIn("data:image/png;base64,BBB", image_items[0]["image_url"]["url"])
@@ -149,6 +152,8 @@ class PlannerPromptTest(unittest.TestCase):
         user_prompt = extract_user_text(llm.messages)
         self.assertIn("Focus on what to achieve, not how", user_prompt)
         self.assertIn("Current Device State", user_prompt)
+        self.assertIn("The Precondition must describe the current observable state BEFORE the Actor starts this subtask.", user_prompt)
+        self.assertNotIn("covered_stage_ids", user_prompt)
         self.assertNotIn("contact editor", user_prompt.lower())
         self.assertNotIn("create-contact", user_prompt.lower())
         self.assertNotIn("fill in <name>", user_prompt.lower())
@@ -221,6 +226,8 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertIn("Frozen stage plan:", user_prompt)
         self.assertIn("Planner instruction:", user_prompt)
         self.assertIn("Visible UI elements summary:", user_prompt)
+        self.assertIn("The Precondition must describe the current observable state BEFORE the Actor starts this subtask.", user_prompt)
+        self.assertNotIn("covered_stage_ids", user_prompt)
         self.assertNotIn("User's Overall Goal", user_prompt)
         self.assertNotIn("Current Device State", user_prompt)
 
@@ -376,6 +383,19 @@ class PlannerParsingTest(unittest.TestCase):
         )
         result = self.planner.parse_response(raw)
         self.assertIn("contiguous adjacent stage ids", result.parse_error or "")
+
+    def test_parse_set_tasks_rejects_app_open_stage_subtask_that_assumes_stage_is_already_done(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","stage_plan":['
+            '{"stage_id":1,"title":"Open Settings","success_signal":"Settings app is foreground"},'
+            '{"stage_id":2,"title":"Reach the network settings section","success_signal":"Network settings entry is visible"},'
+            '{"stage_id":3,"title":"Turn Wi-Fi off","success_signal":"Wi-Fi is disabled"}],'
+            '"current_stage_id":1,"tasks":['
+            '{"task":"Precondition: The Settings app is open. Goal: Navigate to the network settings section.","reason":"Need the next section"}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertEqual(result.parse_error_code, "planner_stage_subtask_misaligned")
+        self.assertIn("current app-opening stage is satisfied", result.parse_error or "")
 
     def test_parse_stage_plan_without_tasks_synthesizes_current_stage_subtask(self) -> None:
         raw = (

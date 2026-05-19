@@ -7,3 +7,4 @@ __pycache__/
 task_loop_smoke_runs/
 zero_shot_runs/
 pipeline.md
+memory_bank/

@@ -173,6 +173,10 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Observation warning", user_prompt)
         self.assertIn("Only system UI elements were retained", user_prompt)
         self.assertIn("prefer a cautious recovery action such as wait or navigate_back", user_prompt)
+        self.assertIn("use a coordinate click on the visible target region", user_prompt)
+        self.assertIn("use a coordinate click on the control itself", user_prompt)
+        self.assertIn("do not continue tapping nearby UI after you have acted on the target control once", user_prompt)
+        self.assertIn("prefer to stop and let the next observation verify the state change", user_prompt)
 
     def test_prompt_includes_grouped_contact_form_constraints(self) -> None:
         llm = FakeLLMClient(['Reason: fill first name.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
@@ -211,7 +215,8 @@ class ActorPromptTest(unittest.TestCase):
         user_prompt = extract_user_text(actor.build_messages(ActorRequest(subtask="Fill a form", observation=observation)))
         self.assertNotIn("Grouped contact form constraints", user_prompt)
         self.assertNotIn("Do not click Save", user_prompt)
-        self.assertIn("Do not click a tab, container, or non-clickable label", user_prompt)
+        self.assertIn("Do not click a non-clickable label", user_prompt)
+        self.assertIn("choose that actionable row or container", user_prompt)
 
     def test_generic_self_written_prompt_uses_old_sections(self) -> None:
         llm = FakeLLMClient(['Reason: tap.\nAction: {"action_type":"click","index":3}'])
@@ -229,6 +234,11 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Visible UI elements:", user_prompt)
         self.assertIn("Visible UI elements JSON:", user_prompt)
         self.assertIn("Decision policy:", user_prompt)
+        self.assertIn("prefer open_app instead of wait", user_prompt)
+        self.assertIn("do not click the non-clickable label", user_prompt.lower())
+        self.assertIn("use x/y coordinates for that visible target region instead", user_prompt)
+        self.assertIn("use a coordinate click on the control itself", user_prompt)
+        self.assertIn("do not continue tapping nearby UI after you have acted on the target control once", user_prompt)
         self.assertIn("Return exactly one action per turn.", user_prompt)
         self.assertNotIn("Current subtask:", user_prompt)
         self.assertNotIn("Current device state:", user_prompt)
@@ -240,6 +250,8 @@ class ActorActionParsingTest(unittest.TestCase):
         action, normalized, normalization_applied, normalization_reason, corrected, correction_reason = parse_actor_action({"action_type": "click", "index": 3}, build_observation())
         self.assertIsInstance(action, ClickAction)
         self.assertEqual(action.index, 3)
+        self.assertIsNone(action.x)
+        self.assertIsNone(action.y)
         self.assertIsNone(normalized)
         self.assertFalse(normalization_applied)
         self.assertIsNone(normalization_reason)
@@ -268,6 +280,23 @@ class ActorActionParsingTest(unittest.TestCase):
         action, _, _, _, _, _ = parse_actor_action({"action_type": "scroll", "direction": "down"}, build_observation())
         self.assertIsInstance(action, ScrollAction)
         self.assertIsNone(action.index)
+
+    def test_parse_valid_click_coordinates_action(self) -> None:
+        action, _, _, _, _, _ = parse_actor_action(
+            {"action_type": "click", "x": 120, "y": 340},
+            build_observation(),
+        )
+        self.assertIsInstance(action, ClickAction)
+        self.assertIsNone(action.index)
+        self.assertEqual(action.x, 120)
+        self.assertEqual(action.y, 340)
+
+    def test_reject_click_with_both_index_and_coordinates(self) -> None:
+        with self.assertRaisesRegex(ValueError, "either index or x/y"):
+            parse_actor_action(
+                {"action_type": "click", "index": 3, "x": 120, "y": 340},
+                build_observation(),
+            )
 
     def test_reject_invalid_index(self) -> None:
         with self.assertRaisesRegex(ValueError, "valid_ui_indices"):
@@ -335,8 +364,290 @@ class ActorActionParsingTest(unittest.TestCase):
         self.assertEqual(corrected, {"action_type": "click", "index": 4})
         self.assertIn("Corrected click target", correction_reason or "")
 
+    def test_falls_back_to_coordinates_for_non_clickable_target_without_clickable_match(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 5,
+                "text": "Network & internet",
+                "content_description": None,
+                "resource_name": "android:id/title",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [189, 824, 625, 895],
+            },
+            {
+                "index": 6,
+                "text": "Mobile, Wi-Fi, hotspot",
+                "content_description": None,
+                "resource_name": "android:id/summary",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [189, 895, 540, 946],
+            },
+        ]
+        observation["valid_ui_indices"] = [5, 6]
+        action, normalized, normalization_applied, normalization_reason, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 5},
+            observation,
+            reason="The 'Network & internet' option is visible and needs to be selected to advance the subtask.",
+            subtask="Precondition: The Settings app is open. Goal: Click on 'Network & Internet' to navigate to the network settings.",
+        )
+        self.assertIsInstance(action, ClickAction)
+        self.assertIsNone(action.index)
+        self.assertEqual(action.x, 320)
+        self.assertEqual(action.y, 860)
+        self.assertIsNone(normalized)
+        self.assertFalse(normalization_applied)
+        self.assertIsNone(normalization_reason)
+        self.assertEqual(corrected, {"action_type": "click", "x": 320, "y": 860})
+        self.assertIn("bbox-based coordinate click", correction_reason or "")
+
+    def test_non_clickable_target_without_bbox_still_fails(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 5,
+                "text": "Network & internet",
+                "content_description": None,
+                "resource_name": "android:id/title",
+                "is_clickable": False,
+                "is_editable": False,
+            }
+        ]
+        observation["valid_ui_indices"] = [5]
+        with self.assertRaisesRegex(ValueError, "non-clickable"):
+            parse_actor_action(
+                {"action_type": "click", "index": 5},
+                observation,
+                reason="The 'Network & internet' option is visible and needs to be selected to advance the subtask.",
+                subtask="Precondition: The Settings app is open. Goal: Click on 'Network & Internet' to navigate to the network settings.",
+            )
+
+    def test_falls_back_to_coordinates_for_non_clickable_switch_widget(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 9,
+                "text": "Wi-Fi",
+                "content_description": None,
+                "resource_name": "android:id/title",
+                "class_name": "android.widget.TextView",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [63, 854, 180, 925],
+            },
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [892, 826, 1038, 952],
+                "raw": {"is_checkable": True, "is_checked": True},
+            },
+        ]
+        observation["valid_ui_indices"] = [9, 10]
+        action, normalized, normalization_applied, normalization_reason, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 10},
+            observation,
+            reason="The Wi-Fi toggle switch is visible and needs to be toggled off.",
+            subtask="Precondition: The Wi-Fi toggle switch is visible and accessible. Goal: Toggle the Wi-Fi off.",
+        )
+        self.assertIsInstance(action, ClickAction)
+        self.assertIsNone(action.index)
+        self.assertEqual(action.x, 965)
+        self.assertEqual(action.y, 889)
+        self.assertIsNone(normalized)
+        self.assertFalse(normalization_applied)
+        self.assertIsNone(normalization_reason)
+        self.assertEqual(corrected, {"action_type": "click", "x": 965, "y": 889})
+        self.assertIn("visible control widget", correction_reason or "")
+
+    def test_falls_back_to_coordinates_for_non_clickable_checkbox_widget(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 12,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/checkbox",
+                "class_name": "android.widget.CheckBox",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [900, 700, 980, 780],
+                "raw": {"is_checkable": True, "is_checked": False},
+            },
+        ]
+        observation["valid_ui_indices"] = [12]
+        action, _, _, _, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 12},
+            observation,
+            reason="The checkbox is visible and should be enabled.",
+            subtask="Precondition: The checkbox control is visible. Goal: Enable the checkbox.",
+        )
+        self.assertIsInstance(action, ClickAction)
+        self.assertEqual((action.x, action.y), (940, 740))
+        self.assertEqual(corrected, {"action_type": "click", "x": 940, "y": 740})
+        self.assertIn("visible control widget", correction_reason or "")
+
+    def test_control_widget_without_bbox_still_fails(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "is_editable": False,
+                "raw": {"is_checkable": True, "is_checked": True},
+            },
+        ]
+        observation["valid_ui_indices"] = [10]
+        with self.assertRaisesRegex(ValueError, "non-clickable"):
+            parse_actor_action(
+                {"action_type": "click", "index": 10},
+                observation,
+                reason="The Wi-Fi toggle switch is visible and needs to be toggled off.",
+                subtask="Precondition: The Wi-Fi toggle switch is visible and accessible. Goal: Toggle the Wi-Fi off.",
+            )
+
+    def test_control_widget_prefers_unique_clickable_index_match_over_coordinates(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 7,
+                "text": None,
+                "content_description": "Wi-Fi switch",
+                "resource_name": "android:id/switch_row",
+                "class_name": "android.widget.LinearLayout",
+                "is_clickable": True,
+                "is_editable": False,
+                "bbox": [780, 800, 1040, 980],
+            },
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [892, 826, 1038, 952],
+                "raw": {"is_checkable": True, "is_checked": True},
+            },
+        ]
+        observation["valid_ui_indices"] = [7, 10]
+        action, _, _, _, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 10},
+            observation,
+            reason="The Wi-Fi toggle switch is visible and needs to be toggled off.",
+            subtask="Precondition: The Wi-Fi toggle switch is visible and accessible. Goal: Toggle the Wi-Fi off.",
+        )
+        self.assertEqual(action.index, 7)
+        self.assertEqual(corrected, {"action_type": "click", "index": 7})
+        self.assertIn("Corrected click target", correction_reason or "")
+
+    def test_non_toggle_goal_does_not_trigger_control_fallback(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [892, 826, 1038, 952],
+                "raw": {"is_checkable": True, "is_checked": True},
+            },
+        ]
+        observation["valid_ui_indices"] = [10]
+        with self.assertRaisesRegex(ValueError, "non-clickable"):
+            parse_actor_action(
+                {"action_type": "click", "index": 10},
+                observation,
+                reason="The switch is visible on screen.",
+                subtask="Precondition: The switch is visible. Goal: Inspect the Wi-Fi settings page.",
+            )
+
 
 class ActorExecutionTest(unittest.TestCase):
+    def test_toggle_control_click_stops_after_first_meaningful_action(self) -> None:
+        llm = FakeLLMClient(
+            ['Reason: The grounded target element is the Wi-Fi switch.\nAction: {"action_type":"click","index":10}']
+        )
+        actor = AndroidActor(llm, ActorConfig(max_steps=4))
+        env = FakeEnv()
+
+        class ToggleObservationAdapter(FakeObservationAdapter):
+            def capture_observation(self, env, goal: str, *, step_id: int = 0, include_screenshots: bool = True):
+                self.calls.append(
+                    {
+                        "goal": goal,
+                        "step_id": step_id,
+                        "include_screenshots": include_screenshots,
+                        "action_count": len(env.actions),
+                    }
+                )
+                return {
+                    **build_observation(step_id=step_id, activity=f"activity-{step_id}", app_name="com.android.settings"),
+                    "ui_elements": [
+                        {
+                            "index": 10,
+                            "text": None,
+                            "content_description": None,
+                            "resource_name": "android:id/switch_widget",
+                            "class_name": "android.widget.Switch",
+                            "is_clickable": False,
+                            "is_editable": False,
+                            "bbox": [892, 826, 1038, 952],
+                            "raw": {"is_checkable": True, "is_checked": False},
+                        }
+                    ],
+                    "valid_ui_indices": [10],
+                    "ui_description": "Wi-Fi switch is visible",
+                }
+
+        adapter = ToggleObservationAdapter()
+        start_observation = {
+            **build_observation(app_name="com.android.settings", foreground_package="com.android.settings"),
+            "ui_elements": [
+                {
+                    "index": 10,
+                    "text": None,
+                    "content_description": None,
+                    "resource_name": "android:id/switch_widget",
+                    "class_name": "android.widget.Switch",
+                    "is_clickable": False,
+                    "is_editable": False,
+                    "bbox": [892, 826, 1038, 952],
+                    "raw": {"is_checkable": True, "is_checked": True},
+                }
+            ],
+            "valid_ui_indices": [10],
+            "ui_description": "Wi-Fi switch is visible",
+        }
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(
+                subtask="Precondition: The Wi-Fi toggle switch is visible and accessible. Goal: Toggle the Wi-Fi off.",
+                observation=start_observation,
+            ),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(result.steps), 1)
+        self.assertIn("Toggle/control action executed", result.steps[0].summary)
+        self.assertEqual(len(env.actions), 1)
+
     def test_status_complete_terminates_immediately(self) -> None:
         llm = FakeLLMClient(['Reason: done.\nAction: {"action_type":"status","goal_status":"complete","message":"ok"}'])
         actor = AndroidActor(llm)

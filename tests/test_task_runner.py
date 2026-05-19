@@ -720,7 +720,7 @@ class TaskRunnerTest(unittest.TestCase):
 
         result = runner.run_task(FakeEnv(), FakeTask([]), "Create a contact")
 
-        self.assertEqual(result.planner_rounds[0].normalized_subtasks[0]["goal"], "Click on the Phone app to open it.")
+        self.assertEqual(result.planner_rounds[0].planner_result["subtasks"][0]["goal"], "Click on the Phone app to open it.")
 
     def test_contact_entry_atomic_goal_is_not_rewritten_by_runner(self) -> None:
         planner = FakePlanner(
@@ -1624,6 +1624,69 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertEqual(event["verifier_reason"], "Verified")
         self.assertTrue(event["memory_eligible"])
         self.assertEqual(event["verifier_evidence_source"], "actor_completed_frame")
+
+    def test_parse_error_trajectory_is_not_saved_to_static_memory(self) -> None:
+        memory = FakeMemoryProvider()
+        planner = FakePlanner(
+            [
+                PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("Settings open", "Reach the network settings section.", "Need the next section")]),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        errored_step = build_actor_step(0, "tap target", ClickAction(5), "parse_error", False)
+        errored_step.parse_error = "click.index must point to a clickable UI element; non-clickable element selected."
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[errored_step],
+                    final_observation=build_observation("after"),
+                    completion_message="done",
+                    last_action={"action_type": "click", "index": 5},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Target visible", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(
+            planner,
+            actor,
+            adapter,
+            verifier=verifier,
+            memory_provider=memory,
+            config=TaskRunConfig(max_planner_rounds=2),
+        )
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Turn wifi off")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(memory.recorded_events), 1)
+        self.assertEqual(len(memory.recorded_trajectories), 0)
+
+    def test_misaligned_app_open_stage_subtask_replans_before_actor_runs(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    stage_plan=[
+                        PlannerStage(1, "Open Settings", "Settings app is open"),
+                        PlannerStage(2, "Navigate to Network & Internet settings", "Network & Internet settings page is visible"),
+                    ],
+                    current_stage_id=1,
+                    subtasks=[PlannerSubtask("Settings app is open.", "Navigate to Network & Internet settings.", "Need the next section")],
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor([])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=2))
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Turn wifi off")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(actor.calls), 0)
+        self.assertEqual(result.planner_rounds[0].replan_reason, "planner_subtask_invalid")
 
     def test_stage_plan_is_persisted_into_next_planner_history(self) -> None:
         planner = FakePlanner(

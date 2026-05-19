@@ -75,20 +75,28 @@ class AnswerAction(ActorAction):
 
 @dataclass
 class ClickAction(ActorAction):
-    index: int
+    index: int | None = None
+    x: int | None = None
+    y: int | None = None
 
-    def __init__(self, index: int) -> None:
+    def __init__(self, index: int | None = None, x: int | None = None, y: int | None = None) -> None:
         super().__init__("click")
         self.index = index
+        self.x = x
+        self.y = y
 
 
 @dataclass
 class LongPressAction(ActorAction):
-    index: int
+    index: int | None = None
+    x: int | None = None
+    y: int | None = None
 
-    def __init__(self, index: int) -> None:
+    def __init__(self, index: int | None = None, x: int | None = None, y: int | None = None) -> None:
         super().__init__("long_press")
         self.index = index
+        self.x = x
+        self.y = y
 
 
 @dataclass
@@ -341,6 +349,7 @@ class AndroidActor:
                     action_payload,
                     current_observation,
                     reason=reason,
+                    subtask=request.subtask,
                 )
             except ValueError as exc:
                 step = ActorStepResult(
@@ -403,6 +412,19 @@ class AndroidActor:
                     done_reason = "execution_error"
                     step_status = "execution_error"
 
+            toggle_control_stop = (
+                done_reason is None
+                and after_observation is not None
+                and _should_stop_after_toggle_control_action(
+                    subtask=request.subtask,
+                    action=action,
+                    before_observation=step_request.observation,
+                )
+            )
+            if toggle_control_stop:
+                done_reason = "completed"
+                step_status = "completed"
+
             summary = _build_rule_summary(
                 subtask=request.subtask,
                 action=action,
@@ -412,6 +434,8 @@ class AndroidActor:
             )
             if normalization_applied and normalization_reason:
                 summary += f" Recoverable actor schema mismatch handled locally. {normalization_reason}"
+            if toggle_control_stop:
+                summary += " Toggle/control action executed; stop and let the next observation verify the state change."
             if (
                 step_request.observation.get("observation_consistency") == "unstable"
                 and action.action_type in {"wait", "navigate_back"}
@@ -501,6 +525,10 @@ class AndroidActor:
             "- If a previous action failed or produced no progress, do not repeat the same action unchanged.\n"
             "- If an action triggers a visible UI change, stop and wait for the next observation instead of predicting further screens.\n"
             "- Prefer exact indexed UI actions when a target is visible in the current observation.\n"
+            "- For click and long_press, prefer a clickable index. If the target label is visible but no matching clickable index is exposed in the observation, you may use x/y coordinates for that visible target region instead.\n"
+            "- If the target is a visible control widget such as a switch, checkbox, radio button, or icon button, and no clickable index is exposed, use a coordinate click on the control itself rather than selecting a known non-clickable index.\n"
+            "- If the current subtask is to toggle, enable, or disable a visible control, do not continue tapping nearby UI after you have acted on the target control once.\n"
+            "- After a meaningful control click, prefer to stop and let the next observation verify the state change.\n"
             "- If the observation is unstable, degraded, or only shows system UI, prefer a cautious recovery action over guessing.\n"
             "- Treat history and memory as decision evidence, not as logs.\n"
             "- Do not output code snippets or natural-language-only actions.\n\n"
@@ -509,7 +537,9 @@ class AndroidActor:
             '- {"action_type":"status","goal_status":"infeasible","message":"..."}\n'
             '- {"action_type":"answer","text":"..."}\n'
             '- {"action_type":"click","index":<target_index>}\n'
+            '- {"action_type":"click","x":<screen_x>,"y":<screen_y>}\n'
             '- {"action_type":"long_press","index":<target_index>}\n'
+            '- {"action_type":"long_press","x":<screen_x>,"y":<screen_y>}\n'
             '- {"action_type":"input_text","index":<target_index>,"text":"...","clear_text":true|false}\n'
             '- {"action_type":"keyboard_enter"}\n'
             '- {"action_type":"navigate_home"}\n'
@@ -548,7 +578,9 @@ class AndroidActor:
             '- {"action_type":"status","goal_status":"infeasible","message":"..."}\n'
             '- {"action_type":"answer","text":"..."}\n'
             '- {"action_type":"click","index":<target_index>}\n'
+            '- {"action_type":"click","x":<screen_x>,"y":<screen_y>}\n'
             '- {"action_type":"long_press","index":<target_index>}\n'
+            '- {"action_type":"long_press","x":<screen_x>,"y":<screen_y>}\n'
             '- {"action_type":"input_text","index":<target_index>,"text":"...","clear_text":true|false}\n'
             '- {"action_type":"keyboard_enter"}\n'
             '- {"action_type":"navigate_home"}\n'
@@ -616,8 +648,15 @@ class AndroidActor:
             "- Use status complete only when the Goal in the current subtask is satisfied.\n"
             "- If the subtask precondition is unmet or the required target is unavailable, use status infeasible.\n"
             "- If a previous action failed or produced no progress, do not repeat it unchanged.\n"
+            "- If the Goal is to open or launch an app and the current foreground package is not that app, prefer open_app instead of wait.\n"
+            "- Do not use wait on launcher or other static screens when a concrete app-launch action is available.\n"
             "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
-            "- If the target is visible in the UI index table, use its exact index rather than a nearby container.\n"
+            "- If the target text is visible but that element is not clickable, do not click the non-clickable label. Choose the clickable row, parent container, or equivalent actionable element associated with that label.\n"
+            "- If the target itself is directly clickable, use its exact index rather than a nearby unrelated container.\n"
+            "- If the target label is visible but no matching clickable index is available in the observation, use x/y coordinates for that visible target region instead of selecting a known non-clickable label index.\n"
+            "- If the target is a visible control widget such as a switch, checkbox, radio button, or icon button, and no clickable index is exposed, use a coordinate click on the control itself rather than selecting a known non-clickable index.\n"
+            "- If the current subtask is to toggle, enable, or disable a visible control, do not continue tapping nearby UI after you have acted on the target control once.\n"
+            "- After a meaningful control click, prefer to stop and let the next observation verify the state change.\n"
             "- If an action triggers a visible UI change, stop rather than predicting the next screen.\n"
             "- If the observation warning indicates degraded UI, avoid assuming the goal is complete.\n"
             "- If observation consistency is unstable, prefer wait or navigate_back rather than blind taps.\n"
@@ -666,8 +705,15 @@ class AndroidActor:
             "- Before choosing an indexed action, first identify the visible UI element that best matches the Goal of the current subtask.\n"
             "- Treat the Goal as the primary grounding target. Use the Reason to justify the match, not to invent a different target.\n"
             "- Match UI elements by meaning, not only by exact wording. '+', 'Create contact', 'Add contact', and 'New contact' may refer to the same creation entry point.\n"
+            "- If the Goal is to open or launch an app and the current foreground package is not that app, prefer open_app instead of wait.\n"
+            "- Do not use wait on launcher or other static screens when a concrete app-launch action is available.\n"
             "- Do not choose an index only because it is nearby, visually salient, or contains a partially related word.\n"
-            "- Do not click a tab, container, or non-clickable label unless it directly satisfies the Goal.\n"
+            "- Do not click a non-clickable label. If the label names the target but only the parent row or container is clickable, choose that actionable row or container.\n"
+            "- If the target label is visible but no matching clickable index is available in the observation, use a coordinate click on the visible target region instead of selecting a known non-clickable label index.\n"
+            "- If the target is a visible control widget such as a switch, checkbox, radio button, or icon button, and no clickable index is exposed, use a coordinate click on the control itself.\n"
+            "- If the current subtask is to toggle, enable, or disable a visible control, do not continue tapping nearby UI after you have acted on the target control once.\n"
+            "- After a meaningful control click, prefer to stop and let the next observation verify the state change.\n"
+            "- Do not click an unrelated tab or container just because its wording looks partially related.\n"
             "- If the Goal is to create or add a contact, prefer the visible creation entry element rather than the currently selected Contacts tab.\n"
             "- In the Reason, explicitly name the grounded target element before giving the action.\n"
             "- If a previous action failed or produced no progress, do not repeat it unchanged. Change strategy or return infeasible.\n"
@@ -829,6 +875,7 @@ def parse_actor_action(
     observation: Dict[str, Any],
     *,
     reason: str = "",
+    subtask: str = "",
 ) -> tuple[ActorAction, Dict[str, Any] | None, bool, str | None, Dict[str, Any] | None, str | None]:
     normalized_payload, normalization_applied, normalization_reason = normalize_actor_action_payload(payload)
     action_type = str(normalized_payload.get("action_type", "")).strip()
@@ -867,36 +914,52 @@ def parse_actor_action(
             None,
         )
     if action_type == "click":
-        corrected = _maybe_correct_index_payload(
+        corrected, correction_reason = _maybe_correct_pointing_payload(
             normalized_payload,
             observation=observation,
             reason=reason,
+            subtask=subtask,
             require_clickable=True,
         )
         final_payload = corrected or normalized_payload
+        index, x, y = _resolve_pointing_target(
+            final_payload,
+            valid_indices,
+            ui_elements_by_index,
+            "click",
+            require_clickable=True,
+        )
         return (
-            ClickAction(index=_validate_index(final_payload, valid_indices, ui_elements_by_index, "click", require_clickable=True)),
+            ClickAction(index=index, x=x, y=y),
             normalized_payload if normalization_applied else None,
             normalization_applied,
             normalization_reason,
             corrected,
-            "Corrected click target from reasoning-grounded unique UI match." if corrected else None,
+            correction_reason,
         )
     if action_type == "long_press":
-        corrected = _maybe_correct_index_payload(
+        corrected, correction_reason = _maybe_correct_pointing_payload(
             normalized_payload,
             observation=observation,
             reason=reason,
+            subtask=subtask,
             require_clickable=True,
         )
         final_payload = corrected or normalized_payload
+        index, x, y = _resolve_pointing_target(
+            final_payload,
+            valid_indices,
+            ui_elements_by_index,
+            "long_press",
+            require_clickable=True,
+        )
         return (
-            LongPressAction(index=_validate_index(final_payload, valid_indices, ui_elements_by_index, "long_press", require_clickable=True)),
+            LongPressAction(index=index, x=x, y=y),
             normalized_payload if normalization_applied else None,
             normalization_applied,
             normalization_reason,
             corrected,
-            "Corrected long_press target from reasoning-grounded unique UI match." if corrected else None,
+            correction_reason,
         )
     if action_type == "input_text":
         text = str(normalized_payload.get("text", "")).strip()
@@ -905,10 +968,11 @@ def parse_actor_action(
         clear_text = normalized_payload.get("clear_text")
         if clear_text is not None:
             clear_text = bool(clear_text)
-        corrected = _maybe_correct_index_payload(
+        corrected, correction_reason = _maybe_correct_pointing_payload(
             normalized_payload,
             observation=observation,
             reason=reason,
+            subtask=subtask,
             require_editable=True,
         )
         final_payload = corrected or normalized_payload
@@ -924,9 +988,7 @@ def parse_actor_action(
             clear_text=clear_text,
         ), (
             normalized_payload if normalization_applied else None
-        ), normalization_applied, normalization_reason, corrected, (
-            "Corrected input_text target from reasoning-grounded unique UI match." if corrected else None
-        )
+        ), normalization_applied, normalization_reason, corrected, correction_reason
     if action_type == "keyboard_enter":
         return (
             KeyboardEnterAction(),
@@ -1034,6 +1096,41 @@ def _validate_index(
     return index
 
 
+def _resolve_pointing_target(
+    payload: dict[str, Any],
+    valid_indices: set[int],
+    ui_elements_by_index: dict[int, dict[str, Any]],
+    action_name: str,
+    *,
+    require_clickable: bool = False,
+) -> tuple[int | None, int | None, int | None]:
+    has_index = "index" in payload and payload.get("index") is not None
+    has_x = "x" in payload and payload.get("x") is not None
+    has_y = "y" in payload and payload.get("y") is not None
+
+    if has_index and (has_x or has_y):
+        raise ValueError(f"{action_name} must provide either index or x/y, not both.")
+    if has_x != has_y:
+        raise ValueError(f"{action_name} must provide both x and y together.")
+    if has_index:
+        index = _validate_index(
+            payload,
+            valid_indices,
+            ui_elements_by_index,
+            action_name,
+            require_clickable=require_clickable,
+        )
+        return index, None, None
+    if has_x and has_y:
+        try:
+            x = int(payload["x"])
+            y = int(payload["y"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{action_name}.x and {action_name}.y must be integers.") from exc
+        return None, x, y
+    raise ValueError(f"{action_name} must provide either index or x/y.")
+
+
 def _observation_is_degraded(observation_warning: str, observation: Dict[str, Any]) -> bool:
     if observation.get("observation_consistency") == "unstable":
         return True
@@ -1042,16 +1139,17 @@ def _observation_is_degraded(observation_warning: str, observation: Dict[str, An
     return bool(observation_warning)
 
 
-def _maybe_correct_index_payload(
+def _maybe_correct_pointing_payload(
     payload: dict[str, Any],
     *,
     observation: Dict[str, Any],
     reason: str,
+    subtask: str,
     require_clickable: bool = False,
     require_editable: bool = False,
-) -> Dict[str, Any] | None:
+) -> tuple[Dict[str, Any] | None, str | None]:
     if "index" not in payload:
-        return None
+        return None, None
     candidate = dict(payload)
     try:
         parsed_index = int(candidate["index"])
@@ -1064,16 +1162,18 @@ def _maybe_correct_index_payload(
         for element in ui_elements
         if element.get("index") is not None
     }
-    target_token = _extract_reason_target(reason)
+    current_target = ui_by_index.get(parsed_index) if parsed_index is not None else None
+    target_token = _extract_target_token(subtask, reason, current_target)
+    control_target_requested = require_clickable and current_target is not None and _is_control_like_target(current_target) and _goal_or_reason_requests_toggle(subtask, reason)
     if parsed_index is not None and parsed_index in valid_indices:
         target = ui_by_index.get(parsed_index) or {}
         target_is_usable = (not require_clickable or bool(target.get("is_clickable"))) and (
             not require_editable or bool(target.get("is_editable"))
         )
         if target_is_usable and (not target_token or _element_matches_token(target, target_token)):
-            return None
-    if not target_token:
-        return None
+            return None, None
+    if not target_token and not control_target_requested:
+        return None, None
     matches: list[dict[str, Any]] = []
     for element in ui_elements:
         if not _element_matches_token(element, target_token):
@@ -1084,27 +1184,240 @@ def _maybe_correct_index_payload(
             continue
         matches.append(element)
     if len(matches) != 1:
-        return None
+        if require_clickable and current_target is not None:
+            fallback, fallback_kind = _build_coordinate_fallback_payload(
+                candidate,
+                current_target,
+                target_token,
+                subtask=subtask,
+                reason=reason,
+            )
+            if fallback is not None and fallback_kind == "label":
+                return fallback, (
+                    "Original index pointed to a non-clickable target label, no matching clickable index was available, "
+                    "and the action was downgraded to a bbox-based coordinate click on the visible target label region."
+                )
+            if fallback is not None and fallback_kind == "control":
+                return fallback, (
+                    "Original index pointed to a non-clickable control widget, no matching clickable index was available, "
+                    "and the action was downgraded to a bbox-based coordinate click on the visible control widget because no clickable index was exposed."
+                )
+        return None, None
     candidate["index"] = int(matches[0]["index"])
-    return candidate
+    action_name = str(candidate.get("action_type") or "action")
+    return candidate, f"Corrected {action_name} target from reasoning-grounded unique UI match."
 
-
-def _extract_reason_target(reason: str) -> str | None:
-    reason_lower = reason.lower()
-    for token in ("phone", "contacts", "create new contact", "add contact"):
-        if token in reason_lower:
-            return token
+def _extract_target_token(
+    subtask: str,
+    reason: str,
+    current_target: dict[str, Any] | None,
+) -> str | None:
+    goal_text = _extract_subtask_goal(subtask)
+    candidates = _quoted_candidates(goal_text) + _quoted_candidates(reason)
+    for candidate in candidates:
+        normalized = _normalize_match_text(candidate)
+        if normalized:
+            return normalized
+    combined_text = " ".join(filter(None, [goal_text, reason])).lower()
+    for token in (
+        "create new contact",
+        "add contact",
+        "create contact",
+        "new contact",
+        "network & internet",
+        "wi-fi",
+        "wifi",
+        "bluetooth",
+        "phone",
+        "contacts",
+    ):
+        if token in combined_text:
+            return _normalize_match_text(token)
+    fallback_fields = []
+    if current_target:
+        fallback_fields.extend(
+            [
+                str(current_target.get("text") or "").strip(),
+                str(current_target.get("content_description") or "").strip(),
+            ]
+        )
+    for candidate in fallback_fields:
+        normalized = _normalize_match_text(candidate)
+        if normalized:
+            return normalized
     return None
 
 
+def _extract_subtask_goal(subtask: str) -> str:
+    match = re.search(r"Goal\s*:\s*(.+?)(?:$|\n)", subtask, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return subtask.strip()
+
+
+def _quoted_candidates(text: str) -> list[str]:
+    return [match.strip() for match in re.findall(r"['\"]([^'\"]+)['\"]", text) if match.strip()]
+
+
+def _normalize_match_text(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    return normalized
+
+
+def _build_coordinate_fallback_payload(
+    payload: dict[str, Any],
+    element: dict[str, Any],
+    target_token: str,
+    *,
+    subtask: str,
+    reason: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    is_label_match = _element_matches_token(element, target_token)
+    is_control_fallback = _is_control_like_target(element) and _goal_or_reason_requests_toggle(subtask, reason)
+    if not is_label_match and not is_control_fallback:
+        return None, None
+    bbox = element.get("bbox") or ()
+    if len(bbox) != 4:
+        return None, None
+    try:
+        x_min, y_min, x_max, y_max = [int(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None, None
+    width = x_max - x_min
+    height = y_max - y_min
+    if width <= 0 or height <= 0:
+        return None, None
+    if is_control_fallback and not is_label_match:
+        x = int(round(x_min + (0.5 * width)))
+        y = int(round(y_min + (0.5 * height)))
+        fallback_kind = "control"
+    else:
+        x = int(round(x_min + (0.3 * width)))
+        y = int(round(y_min + (0.5 * height)))
+        fallback_kind = "label"
+    return (
+        {
+            "action_type": payload.get("action_type"),
+            "x": x,
+            "y": y,
+        },
+        fallback_kind,
+    )
+
+
+def _goal_or_reason_requests_toggle(subtask: str, reason: str) -> bool:
+    combined_text = " ".join(filter(None, [_extract_subtask_goal(subtask), reason])).lower()
+    toggle_markers = (
+        "toggle",
+        "turn off",
+        "turn on",
+        "switch off",
+        "switch on",
+        "disable",
+        "enable",
+    )
+    return any(marker in combined_text for marker in toggle_markers)
+
+
+def _should_stop_after_toggle_control_action(
+    *,
+    subtask: str,
+    action: ActorAction | None,
+    before_observation: Dict[str, Any],
+) -> bool:
+    if action is None or action.action_type not in {"click", "long_press"}:
+        return False
+    if not _goal_or_reason_requests_toggle(subtask, ""):
+        return False
+    target = _resolve_action_target_element(action, before_observation)
+    return target is not None and _is_control_like_target(target)
+
+
+def _resolve_action_target_element(
+    action: ActorAction,
+    observation: Dict[str, Any],
+) -> dict[str, Any] | None:
+    ui_elements = observation.get("ui_elements") or []
+    ui_by_index = {
+        int(element.get("index")): element
+        for element in ui_elements
+        if element.get("index") is not None
+    }
+    index = getattr(action, "index", None)
+    if index is not None:
+        return ui_by_index.get(int(index))
+    x = getattr(action, "x", None)
+    y = getattr(action, "y", None)
+    if x is None or y is None:
+        return None
+    for element in ui_elements:
+        bbox = element.get("bbox") or ()
+        if len(bbox) != 4:
+            continue
+        try:
+            x_min, y_min, x_max, y_max = [int(value) for value in bbox]
+        except (TypeError, ValueError):
+            continue
+        if x_min <= int(x) <= x_max and y_min <= int(y) <= y_max:
+            return element
+    return None
+
+
+def _is_control_like_target(element: dict[str, Any]) -> bool:
+    class_name = str(element.get("class_name") or "").lower()
+    resource_name = str(element.get("resource_name") or "").lower()
+    content_description = str(element.get("content_description") or "").lower()
+    raw = element.get("raw") or {}
+    raw_resource_name = str(raw.get("resource_name") or "").lower()
+    raw_content_description = str(raw.get("content_description") or "").lower()
+
+    control_class_markers = (
+        "switch",
+        "switchcompat",
+        "checkbox",
+        "radiobutton",
+        "togglebutton",
+        "imagebutton",
+    )
+    if any(marker in class_name for marker in control_class_markers):
+        return True
+
+    control_resource_markers = ("switch_widget", "checkbox", "radio", "toggle", "button")
+    resource_fields = (resource_name, raw_resource_name, content_description, raw_content_description)
+    if any(marker in value for value in resource_fields for marker in control_resource_markers if value):
+        return True
+
+    if bool(raw.get("is_checkable")) or raw.get("is_checked") is not None:
+        return True
+    return False
+
+
 def _element_matches_token(element: dict[str, Any], token: str) -> bool:
+    token = _normalize_match_text(token)
+    if not token:
+        return False
     fields = [
-        str(element.get("text") or "").strip().lower(),
-        str(element.get("content_description") or "").strip().lower(),
+        _normalize_match_text(element.get("text") or ""),
+        _normalize_match_text(element.get("content_description") or ""),
+        _normalize_match_text(element.get("resource_name") or ""),
     ]
-    if token in {"create new contact", "add contact"}:
-        return any(value in {"create new contact", "add contact"} or token in value for value in fields)
-    return any(value == token for value in fields)
+    aliases = {
+        "create new contact": {"create new contact", "add contact", "create contact", "new contact"},
+        "add contact": {"create new contact", "add contact", "create contact", "new contact"},
+        "create contact": {"create new contact", "add contact", "create contact", "new contact"},
+        "new contact": {"create new contact", "add contact", "create contact", "new contact"},
+        "wifi": {"wifi", "wi-fi"},
+        "wi-fi": {"wifi", "wi-fi"},
+    }
+    alias_set = aliases.get(token, {token})
+    for value in fields:
+        if not value:
+            continue
+        if value in alias_set:
+            return True
+        if any(alias in value or value in alias for alias in alias_set):
+            return True
+    return False
 
 
 def to_json_action(action: ActorAction) -> json_action.JSONAction:

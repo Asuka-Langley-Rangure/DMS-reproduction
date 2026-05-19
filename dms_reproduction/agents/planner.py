@@ -390,6 +390,21 @@ class AndroidTaskPlanner:
                 )
             )
 
+        stage_alignment_error = _validate_stage_subtask_alignment(
+            stage_plan=stage_plan,
+            current_stage_id=current_stage_id,
+            subtasks=subtasks,
+        )
+        if stage_alignment_error is not None:
+            return PlannerResult(
+                is_goal_complete=False,
+                raw_response=raw_response,
+                parse_error=stage_alignment_error,
+                parse_error_code="planner_stage_subtask_misaligned",
+                repaired_parse=repaired_parse,
+                repair_reason=repair_reason,
+            )
+
         return PlannerResult(
             is_goal_complete=False,
             subtasks=subtasks,
@@ -873,18 +888,20 @@ class AndroidTaskPlanner:
             "At that time you must assess whether the overall user goal is complete, call `complete_goal` if it is complete, "
             "or return the next functional steps if it is not complete.\n\n"
             "**Step Format:**\n"
-            "Each step must be a functional goal.\n"
-            "A **precondition** describing the expected starting screen/state for that step is highly recommended.\n"
+            "Return exactly one current subtask for the selected frozen stage.\n"
+            "That subtask must be a functional goal.\n"
+            "A **precondition** describing the expected starting screen/state for that subtask is required.\n"
             "Each task string must use \"Precondition: ... Goal: ...\".\n"
-            "If a specific precondition is not critical for the first step in your current plan segment, use "
+            "The Precondition must describe the current observable state BEFORE the Actor starts this subtask.\n"
+            "It must be true in the current observation.\n"
+            "Do not write a precondition that will only become true after completing an earlier stage.\n"
+            "If no specific precondition is already true for the current screen, use "
             "\"Precondition: None. Goal: ...\".\n\n"
             "**Your Output:**\n"
             "If the overall user goal is complete, return only:\n"
             '{"tool":"complete_goal","message":"..."}\n\n'
             "Otherwise return only:\n"
             '{"tool":"set_tasks","current_stage_id":1,"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
-            "If one subtask intentionally advances multiple adjacent frozen stages, you may also return:\n"
-            '{"tool":"set_tasks","current_stage_id":1,"covered_stage_ids":[1,2],"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
             "**Memory Persistence:**\n"
             "* You maintain a COMPLETE memory of ALL tasks across the entire session.\n"
             "* Every task that was completed or failed is preserved in your context.\n"
@@ -896,19 +913,20 @@ class AndroidTaskPlanner:
             "- Use the frozen stage plan when choosing current_stage_id.\n"
             "- First determine which frozen milestones are directly supported by the current screen.\n"
             "- Then choose the earliest existing stage that is not yet directly satisfied.\n"
-            f"- Then return 1-{self.config.max_subtasks} subtasks that advance that stage.\n"
+            "- Then return exactly one current subtask that advances that stage.\n"
             "- Use task history to avoid repeating failed or no-progress strategies.\n"
-            "- Default to one main subtask for the current stage unless there are truly distinct parallel milestones.\n"
-            "- Do not return duplicate or near-duplicate tasks in the same response.\n"
-            "- The subtasks must be milestone-shaped, not gesture-shaped.\n"
+            "- Do not return duplicate or near-duplicate tasks.\n"
+            "- The subtask must be milestone-shaped, not gesture-shaped.\n"
             "- Do not output low-level actions or atomic UI operations.\n"
+            "- If current_stage_id refers to an app-opening stage, the returned subtask must still be about opening or launching that app. Do not write a precondition that assumes the app is already open while keeping the same current_stage_id.\n"
+            "- Reason must be consistent with the Precondition. Do not say an app needs to be opened first while also writing a precondition that the app is already open.\n"
+            "- If the current observation does not satisfy a precondition, do not write that precondition. Put the missing requirement into the Goal of the current or earlier stage instead.\n"
             "- Each goal should be a short, functional objective.\n"
             "- Each goal should produce a checkable state change after completion.\n"
             "- If the current screen already exposes a useful entry point, describe the next state to reach rather than the literal tap.\n"
             "- If the current screen is already on a form or detail page, do not fall back to navigation-stage subtasks.\n"
             "- If you think of a tap, click, press, select, long press, scroll, or type action, rewrite it as the milestone state that action is meant to achieve before you output the task.\n"
             "- Ensure current_stage_id and the returned tasks describe the same milestone.\n"
-            "- If covered_stage_ids is present, it must include current_stage_id and must be a contiguous ascending list of adjacent frozen stages that this subtask really advances now.\n"
             "- Return complete_goal only if the current screen directly shows the final requested result and directly satisfies the final frozen milestone.\n"
             "- If task history includes planner_complete_but_task_check_failed, treat it as a planner failure and return a repair, verification, or progress-making subtask unless the current screen now provides new direct evidence that the evaluator can pass.\n"
             "- Return valid JSON only.\n"
@@ -951,29 +969,31 @@ class AndroidTaskPlanner:
             f"{memory_text if memory_text else 'None'}\n\n"
             "Planner instruction:\n"
             "- The frozen stage plan already describes the whole task. Do not rewrite it in this call.\n"
-            "- If adjacent frozen stages are over-fine field-level milestones on the same screen, you may execute them together in one subtask.\n"
-            "- If you do that, keep current_stage_id as the earliest merged stage id and return covered_stage_ids as the exact contiguous frozen stage ids advanced by this subtask.\n"
             "- Do not create separate subtasks for same-form fields such as name and phone unless task history shows a specific field failed.\n"
             "- First determine which frozen milestones are directly supported by the current screen.\n"
             "- Then choose the earliest existing stage that is not yet directly satisfied.\n"
-            "- Then return 1-2 subtasks that advance that stage.\n"
+            "- Then return exactly one current subtask that advances that stage.\n"
             "- Consider complete_goal only as an exception after the previous three checks.\n"
             "- If you return set_tasks, you must return current_stage_id and at least one task.\n"
-            "- Return covered_stage_ids only when one subtask intentionally advances multiple adjacent frozen stages.\n"
             "- Every step must use 'Precondition: ... Goal: ...'.\n"
+            "- The Precondition must describe the current observable state BEFORE the Actor starts this subtask.\n"
+            "- It must be true in the current observation.\n"
+            "- Do not write a precondition that will only become true after completing an earlier stage.\n"
             "- Do not output low-level actions or atomic UI operations.\n"
             "- Each goal should be a short, functional objective.\n"
             "- Each goal should produce a checkable state change after completion.\n"
             "- Use the current screen as the source of truth.\n"
             "- Use task history to avoid repeating failed or no-progress strategies.\n"
-            "- Default to one main subtask for the current stage unless there are truly distinct parallel milestones.\n"
+            "- Return one current subtask for the selected stage, not multiple parallel subtasks.\n"
             "- Do not return duplicate or near-duplicate tasks in the same response.\n"
             "- Do not make a single field, single button, single tab, or single directory click the default subtask granularity.\n"
+            "- If current_stage_id refers to an app-opening stage, the returned subtask must still be about opening or launching that app. Do not write a precondition that says the app is already open while keeping the same current_stage_id.\n"
+            "- Reason must be consistent with the Precondition. Do not say an app needs to be opened first while also writing a precondition that the app is already open.\n"
+            "- If the current observation does not satisfy a precondition, do not write that precondition. Put the missing requirement into the Goal of the current or earlier stage instead.\n"
             "- If the current screen already exposes a useful entry point, describe the next state to reach rather than the literal tap.\n"
             "- If the current screen is already on a form or detail page, do not fall back to navigation-stage subtasks.\n"
             "- If you think of a tap, click, press, select, long press, scroll, or type action, rewrite it as the milestone state that action is meant to achieve before you output the task.\n"
             "- Ensure current_stage_id and the returned tasks describe the same milestone.\n"
-            "- If covered_stage_ids is present, it must include current_stage_id and every listed stage must match the returned subtask semantically.\n"
             "- If the current screen already satisfies one stage's success signal, choose the next unmet stage.\n"
             "- If the current screen seems surprising but there is no explicit repair or state-loss evidence in history, interpret it using the frozen milestones instead of inventing a new plan.\n"
             "- If the screen is unstable, degraded, or ambiguous, prefer a safer recovery or navigation objective instead of assuming success.\n"
@@ -1321,6 +1341,77 @@ def synthesize_precondition_goal_task(task_text: str) -> str | None:
     if re.search(r"\bgoal\s*:", stripped, flags=re.IGNORECASE):
         return None
     return f"Precondition: None. Goal: {stripped}"
+
+
+def _validate_stage_subtask_alignment(
+    *,
+    stage_plan: list[PlannerStage],
+    current_stage_id: int | None,
+    subtasks: list[PlannerSubtask],
+) -> str | None:
+    if not stage_plan or current_stage_id is None or not subtasks:
+        return None
+    current_stage = next((stage for stage in stage_plan if stage.stage_id == current_stage_id), None)
+    if current_stage is None or not _looks_like_app_open_stage(current_stage.title):
+        return None
+    stage_target = _extract_named_app_target(current_stage.title)
+    success_signal = str(current_stage.success_signal or "").strip().lower()
+    if stage_target is None:
+        return None
+    for subtask in subtasks:
+        if "app is open" in success_signal and "app is open" in subtask.precondition.lower() and not re.search(
+            r"^(open|launch)\b",
+            subtask.goal.lower(),
+        ):
+            return (
+                "Planner returned a subtask whose precondition already assumes the current app-opening stage is satisfied. "
+                "Keep the subtask aligned with current_stage_id until that stage is actually advanced."
+            )
+        if _mentions_open_app_completion(subtask.precondition, stage_target) and not _looks_like_open_app_goal(
+            subtask.goal,
+            stage_target,
+        ):
+            return (
+                "Planner returned a subtask whose precondition already assumes the current app-opening stage is satisfied. "
+                "Keep the subtask aligned with current_stage_id until that stage is actually advanced."
+            )
+    return None
+
+
+def _looks_like_app_open_stage(text: str) -> bool:
+    lowered = text.strip().lower()
+    return bool(re.search(r"^(open|launch)\b", lowered))
+
+
+def _extract_named_app_target(text: str) -> str | None:
+    lowered = re.sub(r"\s+", " ", text.strip().lower())
+    match = re.search(r"\b(?:open|launch)\s+the\s+(.+?)\s+app\b", lowered, flags=re.IGNORECASE)
+    if match:
+        return re.sub(r"\s+", " ", match.group(1).strip().lower())
+    match = re.search(r"\b(?:open|launch)\s+(.+)$", lowered, flags=re.IGNORECASE)
+    if not match:
+        return None
+    target = match.group(1).strip().strip(".")
+    if not target:
+        return None
+    return target
+
+
+def _mentions_open_app_completion(text: str, app_target: str) -> bool:
+    lowered = re.sub(r"\s+", " ", text.strip().lower())
+    if app_target not in lowered:
+        return False
+    return bool(
+        re.search(r"\b(is|already)\s+open\b", lowered)
+        or re.search(rf"\b{re.escape(app_target)}(?: app)? is open\b", lowered)
+    )
+
+
+def _looks_like_open_app_goal(text: str, app_target: str) -> bool:
+    lowered = re.sub(r"\s+", " ", text.strip().lower())
+    if app_target not in lowered:
+        return False
+    return bool(re.search(r"\b(open|launch|reach)\b", lowered))
 
 
 def parse_stage_plan_payload(payload: dict[str, Any]) -> tuple[list[PlannerStage], int | None, list[int], str | None]:

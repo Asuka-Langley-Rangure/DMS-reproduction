@@ -1402,7 +1402,48 @@ class AndroidTaskRunner:
             if subtask.task not in seen_tasks:
                 normalized.append(subtask)
                 seen_tasks.add(subtask.task)
+        stage_alignment_error = AndroidTaskRunner._validate_stage_subtask_alignment(
+            normalized,
+            stage_plan=stage_plan or [],
+            current_stage_id=current_stage_id,
+        )
+        if stage_alignment_error is not None:
+            return [], stage_alignment_error
         return normalized, None
+
+    @staticmethod
+    def _validate_stage_subtask_alignment(
+        subtasks: list[PlannerSubtask],
+        *,
+        stage_plan: list[PlannerStage],
+        current_stage_id: int | None,
+    ) -> str | None:
+        if not subtasks or not stage_plan or current_stage_id is None:
+            return None
+        current_stage = next((stage for stage in stage_plan if stage.stage_id == current_stage_id), None)
+        if current_stage is None:
+            return None
+        current_title = str(current_stage.title or "").strip().lower()
+        success_signal = str(current_stage.success_signal or "").strip().lower()
+        if not re.search(r"^(open|launch)\b", current_title):
+            return None
+        stage_target = re.sub(r"^(open|launch)\s+", "", current_title).strip().strip(".")
+        if not stage_target:
+            return None
+        for subtask in subtasks:
+            precondition = str(subtask.precondition or "").strip().lower()
+            goal = str(subtask.goal or "").strip().lower()
+            if "app is open" in success_signal and "app is open" in precondition and not re.search(r"^(open|launch)\b", goal):
+                return (
+                    "Planner subtask is misaligned with the selected app-opening stage. "
+                    "Do not assume the current stage is already complete inside the subtask precondition."
+                )
+            if stage_target in precondition and "open" in precondition and stage_target not in goal:
+                return (
+                    "Planner subtask is misaligned with the selected app-opening stage. "
+                    "Do not assume the current stage is already complete inside the subtask precondition."
+                )
+        return None
 
     @staticmethod
     def _override_completion_blocked(observation: dict[str, Any]) -> bool:
@@ -1502,6 +1543,8 @@ class AndroidTaskRunner:
         )
         self.memory_provider.record(event.to_dict())
         if verifier_result.status != "success":
+            return
+        if any(step.parse_error or step.execution_error for step in actor_result.steps):
             return
         static_memory_record = self._build_static_memory_record(
             user_goal=user_goal,

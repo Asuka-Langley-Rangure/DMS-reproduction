@@ -149,6 +149,188 @@ class VerifierTest(unittest.TestCase):
         self.assertIn("Action history for this subtask:", prompt_text)
         self.assertNotIn("Current Subtask:", prompt_text)
 
+    def test_local_veto_rejects_app_launch_success_without_launch_evidence(self) -> None:
+        llm = FakeLLMClient(['{"verified_success":true,"reason":"history looks okay"}'])
+        verifier = AndroidVerifier(llm, VerifierConfig(prompt_profile="paper_history_first"))
+
+        before = build_observation("launcher")
+        before["foreground_package"] = "com.android.launcher"
+        before["app_name"] = "com.android.launcher"
+        after = build_observation("launcher")
+        after["foreground_package"] = "com.android.launcher"
+        after["app_name"] = "com.android.launcher"
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: None Goal: Open the Contacts app.",
+                action_history=[
+                    {"status": "progress", "reason": "waiting", "action": {"action_type": "wait"}, "summary": "waited", "error": ""}
+                ],
+                before_observation=before,
+                evidence_observation=after,
+                evidence_source="final_after_observation",
+            )
+        )
+
+        self.assertEqual(result.status, "failure")
+        self.assertFalse(result.memory_eligible)
+        self.assertIn("does not show the target app", result.reason)
+
+    def test_local_veto_keeps_app_launch_success_with_open_app_evidence(self) -> None:
+        llm = FakeLLMClient(['{"verified_success":true,"reason":"history looks okay"}'])
+        verifier = AndroidVerifier(llm, VerifierConfig(prompt_profile="paper_history_first"))
+
+        after = build_observation("after")
+        after["foreground_package"] = "com.android.contacts"
+        after["app_name"] = "com.android.contacts"
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: None Goal: Open the Contacts app.",
+                action_history=[
+                    {"status": "progress", "reason": "open contacts", "action": {"action_type": "open_app", "app_name": "Contacts"}, "summary": "opened contacts", "error": ""}
+                ],
+                before_observation=build_observation("before"),
+                evidence_observation=after,
+                evidence_source="actor_completed_frame",
+            )
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertTrue(result.memory_eligible)
+
+    def test_local_veto_rejects_navigation_success_when_target_is_only_visible(self) -> None:
+        llm = FakeLLMClient(['{"verified_success":true,"reason":"target visible"}'])
+        verifier = AndroidVerifier(llm, VerifierConfig(prompt_profile="paper_history_first"))
+
+        before = build_observation("settings")
+        before["ui_description"] = "Network & internet is visible"
+        after = build_observation("settings")
+        after["ui_description"] = "Network & internet is visible"
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: The Settings app is open. Goal: Click on 'Network & internet' to access the network settings.",
+                action_history=[
+                    {
+                        "status": "parse_error",
+                        "reason": "tap network",
+                        "action": {"action_type": "click", "index": 5},
+                        "summary": "non-clickable label selected",
+                        "error": "click.index must point to a clickable UI element; non-clickable element selected.",
+                    }
+                ],
+                before_observation=before,
+                evidence_observation=after,
+                evidence_source="final_after_observation",
+            )
+        )
+
+        self.assertEqual(result.status, "failure")
+        self.assertFalse(result.memory_eligible)
+        self.assertIn("no post-action evidence", result.reason)
+
+    def test_local_veto_rejects_toggle_success_without_checked_state_change(self) -> None:
+        llm = FakeLLMClient(['{"verified_success":true,"reason":"the switch was clicked","memory_eligible":true}'])
+        verifier = AndroidVerifier(llm, VerifierConfig(prompt_profile="paper_history_first"))
+
+        before = build_observation("settings")
+        before["ui_elements"] = [
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "raw": {"is_checkable": True, "is_checked": True},
+            }
+        ]
+        after = build_observation("settings")
+        after["ui_elements"] = [
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "raw": {"is_checkable": True, "is_checked": True},
+            }
+        ]
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: The Wi-Fi toggle switch is visible and accessible. Goal: Toggle the Wi-Fi off.",
+                action_history=[
+                    {
+                        "status": "progress",
+                        "reason": "toggle wifi",
+                        "action": {"action_type": "click", "x": 965, "y": 889},
+                        "summary": "Clicked the Wi-Fi switch.",
+                        "error": "",
+                    }
+                ],
+                before_observation=before,
+                evidence_observation=after,
+                evidence_source="final_after_observation",
+            )
+        )
+
+        self.assertEqual(result.status, "failure")
+        self.assertFalse(result.memory_eligible)
+        self.assertIn("control state actually changed", result.reason)
+
+    def test_local_veto_keeps_toggle_success_when_checked_state_changes(self) -> None:
+        llm = FakeLLMClient(['{"verified_success":true,"reason":"the switch was clicked"}'])
+        verifier = AndroidVerifier(llm, VerifierConfig(prompt_profile="paper_history_first"))
+
+        before = build_observation("settings")
+        before["ui_elements"] = [
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "raw": {"is_checkable": True, "is_checked": True},
+            }
+        ]
+        after = build_observation("settings")
+        after["ui_elements"] = [
+            {
+                "index": 10,
+                "text": None,
+                "content_description": None,
+                "resource_name": "android:id/switch_widget",
+                "class_name": "android.widget.Switch",
+                "is_clickable": False,
+                "raw": {"is_checkable": True, "is_checked": False},
+            }
+        ]
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: The Wi-Fi toggle switch is visible and accessible. Goal: Toggle the Wi-Fi off.",
+                action_history=[
+                    {
+                        "status": "progress",
+                        "reason": "toggle wifi",
+                        "action": {"action_type": "click", "x": 965, "y": 889},
+                        "summary": "Clicked the Wi-Fi switch.",
+                        "error": "",
+                    }
+                ],
+                before_observation=before,
+                evidence_observation=after,
+                evidence_source="actor_completed_frame",
+            )
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertTrue(result.memory_eligible)
+
 
 if __name__ == "__main__":
     unittest.main()
