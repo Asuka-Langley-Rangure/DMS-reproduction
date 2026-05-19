@@ -39,7 +39,7 @@ def extract_image_items(messages):
 class PlannerPromptTest(unittest.TestCase):
     def test_stage_plan_prompt_is_goal_only(self) -> None:
         llm = FakeLLMClient(response='{"stage_plan":[{"stage_id":1,"title":"Open the target app","success_signal":"App is open"},{"stage_id":2,"title":"Reach the working area","success_signal":"Working area is visible"},{"stage_id":3,"title":"Complete the requested action","success_signal":"Requested action is completed"}]}')
-        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5))
+        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5, prompt_profile="generic_paper"))
 
         result = planner.plan_stage_milestones("Delete target_file.mp3 from the device")
 
@@ -56,7 +56,7 @@ class PlannerPromptTest(unittest.TestCase):
 
     def test_prompt_contains_required_sections_and_omits_agent_list(self) -> None:
         llm = FakeLLMClient(response='{"tool":"complete_goal","message":"done"}')
-        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5))
+        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5, prompt_profile="generic_paper"))
         observation = {
             "current_activity": "com.google.android.documentsui.files.FilesActivity",
             "app_name": "Files",
@@ -128,7 +128,7 @@ class PlannerPromptTest(unittest.TestCase):
 
     def test_generic_prompt_uses_structure_only_hints(self) -> None:
         llm = FakeLLMClient(response='{"tool":"complete_goal","message":"done"}')
-        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5))
+        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5, prompt_profile="generic_paper"))
         observation = {
             "current_activity": "com.google.android.documentsui.files.FilesActivity",
             "app_name": "Files",
@@ -194,6 +194,35 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertIn("planner_complete_but_task_check_failed", user_prompt)
         self.assertIn("repair, verification, or progress-making subtask", user_prompt)
         self.assertIn("Ensure current_stage_id and the returned subtask describe the same milestone", user_prompt)
+
+    def test_generic_self_written_profile_uses_old_prompt(self) -> None:
+        llm = FakeLLMClient(response='{"tool":"complete_goal","message":"done"}')
+        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5, prompt_profile="generic_self_written"))
+        observation = {
+            "current_activity": "com.google.android.documentsui.files.FilesActivity",
+            "app_name": "Files",
+            "screen_size": {"width": 1080, "height": 2400},
+            "ui_elements": [{"index": 0, "text": "Delete"}],
+            "ui_description": "Dialog with Delete and Cancel buttons.",
+            "screenshot_b64": "AAA",
+            "labeled_screenshot_b64": "BBB",
+        }
+
+        planner.plan(
+            user_goal="Delete a file from storage",
+            observation=observation,
+            task_history=[],
+            memory_context="",
+        )
+
+        user_prompt = extract_user_text(llm.messages)
+        self.assertIn("User overall goal:", user_prompt)
+        self.assertIn("Current device state:", user_prompt)
+        self.assertIn("Frozen stage plan:", user_prompt)
+        self.assertIn("Planner instruction:", user_prompt)
+        self.assertIn("Visible UI elements summary:", user_prompt)
+        self.assertNotIn("User's Overall Goal", user_prompt)
+        self.assertNotIn("Current Device State", user_prompt)
 
 
 class PlannerParsingTest(unittest.TestCase):

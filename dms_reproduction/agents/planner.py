@@ -94,7 +94,11 @@ class PlannerConfig:
     max_ui_json_chars: int = 12000
     temperature: float = 0.0
     default_actor_name: str = "android_actor"
-    prompt_profile: Literal["generic_dms", "legacy_contact_tuned"] = "generic_dms"
+    prompt_profile: Literal[
+        "generic_self_written",
+        "generic_paper",
+        "legacy_contact_tuned",
+    ] = "generic_self_written"
 
 
 class LLMClient(Protocol):
@@ -801,7 +805,15 @@ class AndroidTaskPlanner:
                 task_history=task_history,
                 memory_context=memory_context,
             )
-        return self._build_generic_example_prompt(
+        if self.config.prompt_profile == "generic_paper":
+            return self._build_generic_example_prompt(
+                user_goal=user_goal,
+                stage_plan=stage_plan,
+                observation=observation,
+                task_history=task_history,
+                memory_context=memory_context,
+            )
+        return self._build_generic_user_prompt(
             user_goal=user_goal,
             stage_plan=stage_plan,
             observation=observation,

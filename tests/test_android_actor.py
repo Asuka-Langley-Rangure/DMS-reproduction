@@ -116,7 +116,7 @@ def extract_user_text(messages) -> str:
 class ActorPromptTest(unittest.TestCase):
     def test_prompt_contains_required_sections_and_actorcode_constraints(self) -> None:
         llm = FakeLLMClient(['Reason: complete.\nAction: {"action_type":"status","goal_status":"complete"}'])
-        actor = AndroidActor(llm, ActorConfig(max_history_items=4))
+        actor = AndroidActor(llm, ActorConfig(max_history_items=4, prompt_profile="generic_paper"))
         request = ActorRequest(
             subtask="Precondition: Contacts is open. Goal: Tap create contact.",
             observation=build_observation(),
@@ -157,7 +157,7 @@ class ActorPromptTest(unittest.TestCase):
 
     def test_prompt_includes_observation_warning(self) -> None:
         llm = FakeLLMClient(['Reason: wait.\nAction: {"action_type":"wait"}'])
-        actor = AndroidActor(llm)
+        actor = AndroidActor(llm, ActorConfig(prompt_profile="generic_paper"))
         request = ActorRequest(
             subtask="Precondition: Phone app is open. Goal: Navigate to contacts tab.",
             observation=build_observation(
@@ -198,7 +198,7 @@ class ActorPromptTest(unittest.TestCase):
 
     def test_generic_prompt_ignores_contact_form_specific_block(self) -> None:
         llm = FakeLLMClient(['Reason: fill a field.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
-        actor = AndroidActor(llm)
+        actor = AndroidActor(llm, ActorConfig(prompt_profile="generic_paper"))
         observation = build_observation(activity="com.google.android.contacts/.activities.ContactEditorActivity")
         observation["contact_form_context"] = {
             "target_fields": ["first_name", "last_name", "phone"],
@@ -212,6 +212,27 @@ class ActorPromptTest(unittest.TestCase):
         self.assertNotIn("Grouped contact form constraints", user_prompt)
         self.assertNotIn("Do not click Save", user_prompt)
         self.assertIn("Do not click a tab, container, or non-clickable label", user_prompt)
+
+    def test_generic_self_written_prompt_uses_old_sections(self) -> None:
+        llm = FakeLLMClient(['Reason: tap.\nAction: {"action_type":"click","index":3}'])
+        actor = AndroidActor(llm, ActorConfig(prompt_profile="generic_self_written"))
+        request = ActorRequest(
+            subtask="Precondition: Contacts is open. Goal: Tap create contact.",
+            observation=build_observation(),
+            action_history=[],
+            memory_context="history memory",
+        )
+
+        user_prompt = extract_user_text(actor.build_messages(request))
+        self.assertIn("Subtask:", user_prompt)
+        self.assertIn("Current screen state:", user_prompt)
+        self.assertIn("Visible UI elements:", user_prompt)
+        self.assertIn("Visible UI elements JSON:", user_prompt)
+        self.assertIn("Decision policy:", user_prompt)
+        self.assertIn("Return exactly one action per turn.", user_prompt)
+        self.assertNotIn("Current subtask:", user_prompt)
+        self.assertNotIn("Current device state:", user_prompt)
+        self.assertNotIn("Acting rules:", user_prompt)
 
 
 class ActorActionParsingTest(unittest.TestCase):

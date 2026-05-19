@@ -108,7 +108,7 @@ class VerifierTest(unittest.TestCase):
 
     def test_build_messages_contains_required_context(self) -> None:
         llm = FakeLLMClient(['{"status":"success","reason":"ok","memory_eligible":true}'])
-        verifier = AndroidVerifier(llm, VerifierConfig(max_history_items=4))
+        verifier = AndroidVerifier(llm, VerifierConfig(max_history_items=4, prompt_profile="paper_history_first"))
         request = VerifierRequest(
             subtask="Precondition: None Goal: Open Contacts",
             action_history=[{"status": "progress", "reason": "tap", "action": {"action_type": "click", "index": 1}, "summary": "moved", "error": ""}],
@@ -122,11 +122,32 @@ class VerifierTest(unittest.TestCase):
         prompt_text = verifier.extract_user_text_prompt(messages)
 
         self.assertIn("Precondition: None Goal: Open Contacts", prompt_text)
-        self.assertIn("Evidence source: actor_completed_frame", prompt_text)
+        self.assertIn("Evidence Source:\nactor_completed_frame", prompt_text)
+        self.assertIn("Before Observation:", prompt_text)
+        self.assertIn("Evidence Observation:", prompt_text)
+        self.assertIn("Execution History:", prompt_text)
+        self.assertIn("memory text", prompt_text)
+
+    def test_self_written_json_is_default_and_uses_old_prompt_shape(self) -> None:
+        llm = FakeLLMClient(['{"status":"success","reason":"ok","memory_eligible":true}'])
+        verifier = AndroidVerifier(llm)
+        request = VerifierRequest(
+            subtask="Precondition: None Goal: Open Contacts",
+            action_history=[],
+            before_observation=build_observation("before"),
+            evidence_observation=build_observation("after"),
+            evidence_source="actor_completed_frame",
+            memory_context="memory text",
+        )
+
+        messages = verifier.build_messages(request)
+        self.assertIn("You are an Android subtask verifier", messages[0]["content"])
+        prompt_text = verifier.extract_user_text_prompt(messages)
+        self.assertIn("Subtask:", prompt_text)
         self.assertIn("Before observation:", prompt_text)
         self.assertIn("Evidence observation:", prompt_text)
         self.assertIn("Action history for this subtask:", prompt_text)
-        self.assertIn("memory text", prompt_text)
+        self.assertNotIn("Current Subtask:", prompt_text)
 
 
 if __name__ == "__main__":

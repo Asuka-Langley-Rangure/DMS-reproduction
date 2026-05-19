@@ -590,6 +590,21 @@ class AndroidTaskRunner:
                     success_check=success_check,
                     observation=observation,
                 )
+                if subtask_completed and self.config.stop_on_goal_complete and self._task_success_if_available(task, env):
+                    return TaskRunResult(
+                        status="completed",
+                        planner_rounds=planner_rounds,
+                        initial_stage_plan=initial_stage_plan_record.to_dict(),
+                        stage_plan_revisions=[record.to_dict() for record in stage_plan_revisions],
+                        final_observation=observation,
+                        final_task_success=True,
+                        total_actor_steps=total_actor_steps,
+                        completion_message=(
+                            actor_result.completion_message
+                            or verifier_result.reason
+                            or "Task check passed after subtask execution."
+                        ),
+                    )
 
                 if subtask_completed:
                     recent_completed_subtasks[subtask.task] = recent_completed_subtasks.get(subtask.task, 0) + 1
@@ -720,6 +735,13 @@ class AndroidTaskRunner:
     @staticmethod
     def _task_success(task: Any, env: Any) -> bool:
         return bool(task.is_successful(env) == 1)
+
+    @staticmethod
+    def _task_success_if_available(task: Any, env: Any) -> bool:
+        try:
+            return AndroidTaskRunner._task_success(task, env)
+        except AssertionError:
+            return False
 
     @staticmethod
     def _prepare_actor_observation(

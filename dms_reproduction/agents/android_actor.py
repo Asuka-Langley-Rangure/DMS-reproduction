@@ -30,7 +30,11 @@ class ActorConfig:
     max_memory_context_chars: int = 6000
     temperature: float = 0.0
     wait_after_action_seconds: float = 0.0
-    prompt_profile: Literal["generic_dms", "legacy_contact_tuned"] = "generic_dms"
+    prompt_profile: Literal[
+        "generic_self_written",
+        "generic_paper",
+        "legacy_contact_tuned",
+    ] = "generic_self_written"
 
 
 @dataclass
@@ -576,7 +580,53 @@ class AndroidActor:
     def _build_user_prompt(self, request: ActorRequest) -> str:
         if self.config.prompt_profile == "legacy_contact_tuned":
             return self._build_legacy_user_prompt(request)
-        return self._build_generic_example_prompt(request)
+        if self.config.prompt_profile == "generic_paper":
+            return self._build_generic_example_prompt(request)
+        return self._build_generic_user_prompt(request)
+
+    def _build_generic_user_prompt(self, request: ActorRequest) -> str:
+        observation = request.observation
+        foreground_package = observation.get("foreground_package") or "Unknown"
+        dominant_ui_package = observation.get("app_name") or "Unknown"
+        observation_warning = observation.get("observation_warning")
+        observation_consistency = observation.get("observation_consistency") or "stable"
+        return (
+            f"Subtask:\n{request.subtask}\n\n"
+            "Current screen state:\n"
+            f"- Foreground package: {foreground_package}\n"
+            f"- Dominant visible UI package: {dominant_ui_package}\n"
+            f"- Current activity: {observation.get('current_activity') or 'Unknown'}\n"
+            f"- Screen size: {json.dumps(observation.get('screen_size') or {}, ensure_ascii=False)}\n"
+            f"- Visible UI count: {observation.get('visible_ui_count', 0)}\n"
+            f"- Clickable UI count: {observation.get('clickable_ui_count', 0)}\n"
+            f"- Non-system UI count: {observation.get('non_system_ui_count', 0)}\n"
+            f"- Observation consistency: {observation_consistency}\n"
+            "- You are given the labeled screenshot in this message.\n\n"
+            f"Observation warning:\n{observation_warning or 'None'}\n\n"
+            f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
+            f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
+            f"Visible UI elements JSON:\n{self._format_ui_json(observation.get('ui_elements') or [])}\n\n"
+            f"Recent execution history:\n{self._format_history(request.action_history)}\n\n"
+            "Retrieved memory context:\n"
+            f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
+            "Decision policy:\n"
+            "- Execute this subtask step by step using one valid GUI action.\n"
+            "- Base the choice on the current GUI state, history, and memory.\n"
+            "- Prefer the smallest necessary action that advances the subtask.\n"
+            "- Use status complete only when the Goal in the current subtask is satisfied.\n"
+            "- If the subtask precondition is unmet or the required target is unavailable, use status infeasible.\n"
+            "- If a previous action failed or produced no progress, do not repeat it unchanged.\n"
+            "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
+            "- If the target is visible in the UI index table, use its exact index rather than a nearby container.\n"
+            "- If an action triggers a visible UI change, stop rather than predicting the next screen.\n"
+            "- If the observation warning indicates degraded UI, avoid assuming the goal is complete.\n"
+            "- If observation consistency is unstable, prefer wait or navigate_back rather than blind taps.\n"
+            "- Return exactly one action in the required JSON action format.\n\n"
+            "Output format:\n"
+            "Reason: <brief rationale>\n"
+            'Action: {"action_type":"..."}\n'
+            "Return exactly one action per turn."
+        )
 
     def _build_generic_example_prompt(self, request: ActorRequest) -> str:
         observation = request.observation

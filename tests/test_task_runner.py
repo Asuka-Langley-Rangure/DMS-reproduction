@@ -433,11 +433,44 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertTrue(result.final_task_success)
         self.assertEqual(result.completion_message, "done")
 
+    def test_global_task_success_after_subtask_stops_without_waiting_for_planner_complete(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    subtasks=[PlannerSubtask("None", "Open Contacts", "Need app")],
+                ),
+                PlannerResult(is_goal_complete=True, completion_message="should not be needed"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "open app", ClickAction(3), "completed", True)],
+                    final_observation=build_observation("after-subtask-1"),
+                    completion_message="opened contacts",
+                    last_action={"action_type": "click", "index": 3},
+                ),
+            ]
+        )
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter)
+        task = FakeTask([1.0])
+
+        result = runner.run_task(FakeEnv(), task, "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(result.final_task_success)
+        self.assertEqual(result.completion_message, "opened contacts")
+        self.assertEqual(len(planner.calls), 1)
+        self.assertEqual(len(actor.calls), 1)
+
     def test_planner_parse_error_returns_planner_error(self) -> None:
         planner = FakePlanner([PlannerResult(is_goal_complete=False, parse_error="bad json")])
         actor = FakeActor([])
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter)
+        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -474,7 +507,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter)
+        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(stop_on_goal_complete=False))
         task = FakeTask([1.0])
 
         result = runner.run_task(FakeEnv(), task, "Create a contact")
@@ -506,7 +539,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter)
+        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(stop_on_goal_complete=False))
         task = FakeTask([1.0])
 
         result = runner.run_task(FakeEnv(), task, "Create a contact")
@@ -539,7 +572,7 @@ class TaskRunnerTest(unittest.TestCase):
                 ]
             )
             adapter = FakeObservationAdapter([build_observation("initial")])
-            runner = AndroidTaskRunner(planner, actor, adapter)
+            runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(stop_on_goal_complete=False))
             task = FakeTask([1.0])
 
             result = runner.run_task(FakeEnv(), task, "Create a contact")
@@ -561,7 +594,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -654,7 +687,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([]), "Create a contact")
 
@@ -799,7 +832,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial"), recovered])
-        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1309,7 +1342,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3))
+        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1347,7 +1380,7 @@ class TaskRunnerTest(unittest.TestCase):
         )
         verifier = FakeVerifier([{"status": "success", "reason": "Merged stages succeeded.", "memory_eligible": True}])
         adapter = FakeObservationAdapter([build_dialer_contacts_observation()])
-        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1384,7 +1417,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3))
+        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1424,7 +1457,7 @@ class TaskRunnerTest(unittest.TestCase):
             ]
         )
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3))
+        runner = AndroidTaskRunner(planner, actor, adapter, config=TaskRunConfig(max_planner_rounds=3, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1487,7 +1520,7 @@ class TaskRunnerTest(unittest.TestCase):
         )
         verifier = FakeVerifier([{"status": "success", "reason": "Contacts is visible.", "memory_eligible": True}])
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1516,7 +1549,7 @@ class TaskRunnerTest(unittest.TestCase):
         )
         verifier = FakeVerifier([{"status": "uncertain", "reason": "Need stronger evidence.", "memory_eligible": False}])
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1546,7 +1579,7 @@ class TaskRunnerTest(unittest.TestCase):
         )
         verifier = FakeVerifier([{"status": "success", "reason": "Final frame shows success.", "memory_eligible": True}])
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 
@@ -1620,7 +1653,7 @@ class TaskRunnerTest(unittest.TestCase):
         )
         verifier = FakeVerifier([{"status": "success", "reason": "Entry is visible.", "memory_eligible": True}])
         adapter = FakeObservationAdapter([build_observation("initial")])
-        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2))
+        runner = AndroidTaskRunner(planner, actor, adapter, verifier=verifier, config=TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False))
 
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
 

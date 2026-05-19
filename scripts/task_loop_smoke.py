@@ -53,9 +53,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument(
-        "--prompt_profile",
-        default="generic_dms",
-        choices=["generic_dms", "legacy_contact_tuned"],
+        "--planner_prompt_profile",
+        default="generic_self_written",
+        choices=["generic_self_written", "generic_paper", "legacy_contact_tuned"],
+    )
+    parser.add_argument(
+        "--actor_prompt_profile",
+        default="generic_self_written",
+        choices=["generic_self_written", "generic_paper", "legacy_contact_tuned"],
+    )
+    parser.add_argument(
+        "--verifier_prompt_profile",
+        default="self_written_json",
+        choices=["self_written_json", "paper_history_first"],
     )
 
     parser.add_argument("--ssh_host", default="114.212.165.149")
@@ -91,9 +101,9 @@ def parse_args() -> argparse.Namespace:
         default="lexical_jaccard",
         choices=["lexical_jaccard", "embedding_product", "embedding_weighted_sum"],
     )
-    parser.add_argument("--embedding_base_url", default="")
-    parser.add_argument("--embedding_api_key", default="")
-    parser.add_argument("--embedding_model", default="")
+    parser.add_argument("--embedding_base_url", default="http://127.0.0.1:19007/v1")
+    parser.add_argument("--embedding_api_key", default="EMPTY")
+    parser.add_argument("--embedding_model", default="bge-small-en-v1.5")
     parser.add_argument("--embedding_timeout", type=int, default=120)
     return parser.parse_args()
 
@@ -690,20 +700,21 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         )
         planner = AndroidTaskPlanner(
             llm_client,
-            PlannerConfig(prompt_profile=args.prompt_profile),
+            PlannerConfig(prompt_profile=args.planner_prompt_profile),
         )
         actor = AndroidActor(
             llm_client,
             ActorConfig(
                 max_steps=args.max_actor_steps,
                 temperature=args.temperature,
-                prompt_profile=args.prompt_profile,
+                prompt_profile=args.actor_prompt_profile,
             ),
         )
         verifier = AndroidVerifier(
             llm_client,
             VerifierConfig(
                 temperature=args.temperature,
+                prompt_profile=args.verifier_prompt_profile,
             ),
         )
         adapter = AndroidWorldObservationAdapter(max_ui_elements=args.max_ui_elements)

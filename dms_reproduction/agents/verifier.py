@@ -20,7 +20,7 @@ class VerifierConfig:
     max_ui_json_chars: int = 12000
     max_memory_context_chars: int = 6000
     temperature: float = 0.0
-    prompt_profile: Literal["current_json", "paper_history_first"] = "paper_history_first"
+    prompt_profile: Literal["self_written_json", "paper_history_first"] = "self_written_json"
 
 
 @dataclass
