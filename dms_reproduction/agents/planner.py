@@ -44,6 +44,7 @@ class PlannerResult:
     subtasks: List[PlannerSubtask] = field(default_factory=list)
     stage_plan: List[PlannerStage] = field(default_factory=list)
     current_stage_id: int | None = None
+    covered_stage_ids: List[int] = field(default_factory=list)
     raw_response: str = ""
     parse_error: Optional[str] = None
     parse_error_code: Optional[str] = None
@@ -57,6 +58,7 @@ class PlannerResult:
             "subtasks": [subtask.to_dict() for subtask in self.subtasks],
             "stage_plan": [stage.to_dict() for stage in self.stage_plan],
             "current_stage_id": self.current_stage_id,
+            "covered_stage_ids": list(self.covered_stage_ids),
             "raw_response": self.raw_response,
             "parse_error": self.parse_error,
             "parse_error_code": self.parse_error_code,
@@ -239,7 +241,7 @@ class AndroidTaskPlanner:
 
         tool = payload.get("tool")
         if tool == "complete_goal":
-            stage_plan, current_stage_id, stage_error = parse_stage_plan_payload(payload)
+            stage_plan, current_stage_id, covered_stage_ids, stage_error = parse_stage_plan_payload(payload)
             if stage_error is not None:
                 return PlannerResult(
                     is_goal_complete=False,
@@ -254,6 +256,7 @@ class AndroidTaskPlanner:
                 completion_message=str(payload.get("message", "")).strip(),
                 stage_plan=stage_plan,
                 current_stage_id=current_stage_id,
+                covered_stage_ids=covered_stage_ids,
                 raw_response=raw_response,
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
@@ -272,7 +275,7 @@ class AndroidTaskPlanner:
         tasks = payload.get("tasks")
         if tasks is None:
             tasks = payload.get("task_assignments")
-        stage_plan, current_stage_id, stage_error = parse_stage_plan_payload(payload)
+        stage_plan, current_stage_id, covered_stage_ids, stage_error = parse_stage_plan_payload(payload)
         if stage_error is not None:
             return PlannerResult(
                 is_goal_complete=False,
@@ -302,6 +305,7 @@ class AndroidTaskPlanner:
                 subtasks=[synthesized_subtask],
                 stage_plan=stage_plan,
                 current_stage_id=current_stage_id,
+                covered_stage_ids=covered_stage_ids,
                 raw_response=raw_response,
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
@@ -342,17 +346,35 @@ class AndroidTaskPlanner:
 
             parsed = parse_precondition_goal(task_text)
             if parsed is None:
-                return PlannerResult(
-                    is_goal_complete=False,
-                    raw_response=raw_response,
-                    parse_error=(
-                        f"Planner task at index {index} must use "
-                        "'Precondition: ... Goal: ...' format."
-                    ),
-                    parse_error_code="planner_task_format_invalid",
-                    repaired_parse=repaired_parse,
-                    repair_reason=repair_reason,
-                )
+                repaired_task_text = synthesize_precondition_goal_task(task_text)
+                if repaired_task_text is None:
+                    return PlannerResult(
+                        is_goal_complete=False,
+                        raw_response=raw_response,
+                        parse_error=(
+                            f"Planner task at index {index} must use "
+                            "'Precondition: ... Goal: ...' format."
+                        ),
+                        parse_error_code="planner_task_format_invalid",
+                        repaired_parse=repaired_parse,
+                        repair_reason=repair_reason,
+                    )
+                parsed = parse_precondition_goal(repaired_task_text)
+                if parsed is None:
+                    return PlannerResult(
+                        is_goal_complete=False,
+                        raw_response=raw_response,
+                        parse_error=(
+                            f"Planner task at index {index} must use "
+                            "'Precondition: ... Goal: ...' format."
+                        ),
+                        parse_error_code="planner_task_format_invalid",
+                        repaired_parse=repaired_parse,
+                        repair_reason=repair_reason,
+                    )
+                repaired_parse = True
+                if repair_reason is None:
+                    repair_reason = "synthesized_precondition_none_for_legacy_task_text"
 
             precondition, goal = parsed
             subtasks.append(
@@ -369,6 +391,7 @@ class AndroidTaskPlanner:
             subtasks=subtasks,
             stage_plan=stage_plan,
             current_stage_id=current_stage_id,
+            covered_stage_ids=covered_stage_ids,
             raw_response=raw_response,
             repaired_parse=repaired_parse,
             repair_reason=repair_reason,
@@ -394,7 +417,7 @@ class AndroidTaskPlanner:
                 raw_response=raw_response,
                 parse_error="Failed to parse planner stage-plan JSON.",
             )
-        stage_plan, current_stage_id, stage_error = parse_stage_plan_payload(payload)
+        stage_plan, current_stage_id, covered_stage_ids, stage_error = parse_stage_plan_payload(payload)
         if stage_error is not None:
             return StagePlanResult(
                 raw_response=raw_response,
@@ -406,6 +429,13 @@ class AndroidTaskPlanner:
             return StagePlanResult(
                 raw_response=raw_response,
                 parse_error="Initial stage-plan generation must not include current_stage_id.",
+                repaired_parse=repaired_parse,
+                repair_reason=repair_reason,
+            )
+        if covered_stage_ids:
+            return StagePlanResult(
+                raw_response=raw_response,
+                parse_error="Initial stage-plan generation must not include covered_stage_ids.",
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
             )
@@ -445,9 +475,15 @@ class AndroidTaskPlanner:
             "You are not choosing the next tap, click, or current-round subtask.\n"
             "You do not see the current device state in this call.\n\n"
             "Stage-plan rules:\n"
-            "- Build exactly 3-5 high-level milestones for the whole task.\n"
-            "- The stage plan must cover the main path from start to completion.\n"
-            "- Each milestone must be a verifiable intermediate result, not a UI gesture.\n"
+            "- Build 3-5 high-level milestones for the whole task.\n"
+            "- Prefer 3 or 4 milestones when the task is simple. Do not force 5 milestones.\n"
+            "- The stage plan must cover the main path from start to verified completion.\n"
+            "- Each milestone must describe a verifiable UI phase, task phase, or state transition.\n"
+            "- A milestone must not be a single click, single button, single tab, single field, or single text-entry operation.\n"
+            "- A milestone should usually correspond to a reusable procedure that may take multiple actor actions.\n"
+            "- For form-filling tasks, combine related fields on the same form into one milestone, such as 'Fill all required form information'.\n"
+            "- Do not create separate milestones for name, phone, amount, title, date, or other individual fields when they are filled on the same form.\n"
+            "- Only split fields into separate milestones if they require different screens, different workflows, or independent verification.\n"
             "- Do not collapse the whole task into one stage such as 'Open app'.\n"
             "- Do not include current_stage_id.\n"
             "- Do not include tasks or subtasks.\n"
@@ -472,6 +508,10 @@ class AndroidTaskPlanner:
             "Rules:\n"
             "- Do not rewrite, replace, or expand the stage plan.\n"
             "- Use only the provided stage plan when choosing current_stage_id.\n"
+            "- If adjacent frozen stages are over-fine field-level milestones on the same screen, you may execute them together in one subtask.\n"
+            "- In that case, keep current_stage_id as the earliest merged stage id and also return covered_stage_ids with every merged frozen stage id.\n"
+            "- covered_stage_ids must be a contiguous ascending list, must include current_stage_id, and must only contain adjacent frozen stages that this subtask really advances now.\n"
+            "- This is not rewriting the frozen plan; it is grouping same-screen field-level milestones for execution.\n"
             "- Determine which frozen milestones are directly supported by the current observation before choosing current_stage_id.\n"
             "- Choose the earliest stage that is not yet directly satisfied by the current observation.\n"
             "- Do not jump to a later stage unless the current observation directly satisfies every earlier stage's success signal.\n"
@@ -496,9 +536,12 @@ class AndroidTaskPlanner:
             '{"tool":"complete_goal","message":"..."}\n\n'
             "or\n\n"
             '{"tool":"set_tasks","current_stage_id":1,"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
+            "or, when one subtask intentionally advances multiple adjacent frozen stages:\n\n"
+            '{"tool":"set_tasks","current_stage_id":1,"covered_stage_ids":[1,2],"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
             "Constraints:\n"
             "- Return valid JSON only.\n"
             "- If tool is set_tasks, return at least one task.\n"
+            "- Return covered_stage_ids only when one subtask intentionally advances multiple adjacent frozen stages.\n"
             "- Do not include stage_plan unless explicitly repairing it, which is not part of this call."
         )
 
@@ -702,10 +745,14 @@ class AndroidTaskPlanner:
         return (
             f"User overall goal:\n{user_goal}\n\n"
             "Planner instruction:\n"
-            f"- Decompose this goal into exactly 3-{self.config.max_subtasks} whole-task milestones.\n"
+            f"- Decompose this goal into 3-{self.config.max_subtasks} high-level whole-task milestones.\n"
+            "- Prefer 3 or 4 milestones when the task is simple. Do not force 5 milestones.\n"
             "- Do not use current observation, task history, or current screen assumptions.\n"
             "- Cover the whole main path from task start to verified completion.\n"
             "- Each milestone must be a verifiable intermediate result.\n"
+            "- A milestone must be a UI phase, task phase, or state transition, not a single field, button, tab, click, or text input.\n"
+            "- For form-filling tasks, combine related fields on the same form into one milestone.\n"
+            "- Do not split name and phone number, title and body, amount and note, or similar same-form fields into separate milestones unless they require different screens.\n"
             "- Do not return current_stage_id.\n"
             "- Do not return tasks or subtasks.\n"
             "- Do not collapse the plan into a single stage such as opening an app.\n"
@@ -754,12 +801,105 @@ class AndroidTaskPlanner:
                 task_history=task_history,
                 memory_context=memory_context,
             )
-        return self._build_generic_user_prompt(
+        return self._build_generic_example_prompt(
             user_goal=user_goal,
             stage_plan=stage_plan,
             observation=observation,
             task_history=task_history,
             memory_context=memory_context,
+        )
+
+    def _build_generic_example_prompt(
+        self,
+        user_goal: str,
+        stage_plan: List[PlannerStage],
+        observation: Dict[str, Any],
+        task_history: List[Dict[str, Any]],
+        memory_context: str,
+    ) -> str:
+        current_activity = observation.get("current_activity") or "Unknown"
+        app_name = observation.get("app_name") or "Unknown"
+        screen_size = observation.get("screen_size") or {}
+        ui_description = observation.get("ui_description") or "No visible UI elements available."
+        history_text = self._format_task_history(task_history)
+        stage_plan_text = self._format_frozen_stage_plan(stage_plan)
+        memory_text = self._truncate(memory_context.strip(), self.config.max_memory_context_chars)
+
+        return (
+            "You are an Android Task Planner. Your job is to create short, functional plans "
+            f"(1-{self.config.max_subtasks} steps) to achieve a user's goal on an Android device.\n\n"
+            "**Inputs You Receive:**\n"
+            "1. **User's Overall Goal.**\n"
+            "2. **Current Device State:**\n"
+            "   * A **screenshot** of the current screen with red bounding boxes and numeric labels.\n"
+            "   * The numeric labels correspond to the indexed UI elements described below.\n"
+            "   * The current visible Android activity.\n"
+            "   * A **Visible UI elements summary** describing the current screen.\n"
+            "3. **Complete Task History:**\n"
+            "   * A record of ALL tasks that have been completed or failed throughout the session.\n"
+            "   * For completed tasks, the results and any discovered information.\n"
+            "   * For failed tasks, the detailed reasons for failure.\n"
+            "   * This history persists across all planning cycles and is never lost.\n"
+            "4. **Retrieved memory context** from previous trials when available.\n\n"
+            f"User's Overall Goal:\n{user_goal}\n\n"
+            "Current Device State:\n"
+            f"- Current app: {app_name}\n"
+            f"- Current activity: {current_activity}\n"
+            f"- Screen size: {json.dumps(screen_size, ensure_ascii=False)}\n"
+            "Visible UI elements summary:\n"
+            f"{ui_description}\n\n"
+            "Complete Task History:\n"
+            f"{history_text}\n\n"
+            "Retrieved memory context:\n"
+            f"{memory_text if memory_text else 'None'}\n\n"
+            "Frozen stage plan:\n"
+            f"{stage_plan_text}\n\n"
+            "**Your Task:**\n"
+            f"Given the goal, current state, and task history, devise the **next 1-{self.config.max_subtasks} functional steps**.\n"
+            "Focus on what to achieve, not how. Planning fewer steps at a time improves accuracy, as the state can change.\n"
+            "After your planned steps are executed, you will be invoked again with the new device state.\n"
+            "At that time you must assess whether the overall user goal is complete, call `complete_goal` if it is complete, "
+            "or return the next functional steps if it is not complete.\n\n"
+            "**Step Format:**\n"
+            "Each step must be a functional goal.\n"
+            "A **precondition** describing the expected starting screen/state for that step is highly recommended.\n"
+            "Each task string must use \"Precondition: ... Goal: ...\".\n"
+            "If a specific precondition is not critical for the first step in your current plan segment, use "
+            "\"Precondition: None. Goal: ...\".\n\n"
+            "**Your Output:**\n"
+            "If the overall user goal is complete, return only:\n"
+            '{"tool":"complete_goal","message":"..."}\n\n'
+            "Otherwise return only:\n"
+            '{"tool":"set_tasks","current_stage_id":1,"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
+            "If one subtask intentionally advances multiple adjacent frozen stages, you may also return:\n"
+            '{"tool":"set_tasks","current_stage_id":1,"covered_stage_ids":[1,2],"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
+            "**Memory Persistence:**\n"
+            "* You maintain a COMPLETE memory of ALL tasks across the entire session.\n"
+            "* Every task that was completed or failed is preserved in your context.\n"
+            "* Previously completed steps are never lost when returning new steps.\n"
+            "* Use this accumulated knowledge to build progressively on successful steps.\n"
+            "* When you see discovered information, use it explicitly in future tasks.\n\n"
+            "**System Compatibility Constraints:**\n"
+            "- The frozen stage plan already describes the whole task. Do not rewrite it in this call.\n"
+            "- Use the frozen stage plan when choosing current_stage_id.\n"
+            "- First determine which frozen milestones are directly supported by the current screen.\n"
+            "- Then choose the earliest existing stage that is not yet directly satisfied.\n"
+            f"- Then return 1-{self.config.max_subtasks} subtasks that advance that stage.\n"
+            "- Use task history to avoid repeating failed or no-progress strategies.\n"
+            "- Default to one main subtask for the current stage unless there are truly distinct parallel milestones.\n"
+            "- Do not return duplicate or near-duplicate tasks in the same response.\n"
+            "- The subtasks must be milestone-shaped, not gesture-shaped.\n"
+            "- Do not output low-level actions or atomic UI operations.\n"
+            "- Each goal should be a short, functional objective.\n"
+            "- Each goal should produce a checkable state change after completion.\n"
+            "- If the current screen already exposes a useful entry point, describe the next state to reach rather than the literal tap.\n"
+            "- If the current screen is already on a form or detail page, do not fall back to navigation-stage subtasks.\n"
+            "- If you think of a tap, click, press, select, long press, scroll, or type action, rewrite it as the milestone state that action is meant to achieve before you output the task.\n"
+            "- Ensure current_stage_id and the returned tasks describe the same milestone.\n"
+            "- If covered_stage_ids is present, it must include current_stage_id and must be a contiguous ascending list of adjacent frozen stages that this subtask really advances now.\n"
+            "- Return complete_goal only if the current screen directly shows the final requested result and directly satisfies the final frozen milestone.\n"
+            "- If task history includes planner_complete_but_task_check_failed, treat it as a planner failure and return a repair, verification, or progress-making subtask unless the current screen now provides new direct evidence that the evaluator can pass.\n"
+            "- Return valid JSON only.\n"
         )
 
     def _build_generic_user_prompt(
@@ -785,12 +925,12 @@ class AndroidTaskPlanner:
         return (
             f"User overall goal:\n{user_goal}\n\n"
             "Current device state:\n"
-            f"- Current app: {app_name}\n"
-            f"- Current activity: {current_activity}\n"
-            f"- Screen size: {json.dumps(screen_size, ensure_ascii=False)}\n"
-            "- You are given both the raw screenshot and the labeled screenshot in this message.\n\n"
+            # f"- Current app: {app_name}\n"
+            # f"- Current activity: {current_activity}\n"
+            # f"- Screen size: {json.dumps(screen_size, ensure_ascii=False)}\n"
+            "- You are given a screenshot with red bounding boxes and numeric labels.\n"
+            "- The numeric labels correspond to UI element indexes below.\n"
             f"Visible UI elements summary:\n{ui_description}\n\n"
-            f"Visible UI elements JSON:\n{ui_json}\n\n"
             f"Complete task history:\n{history_text}\n\n"
             f"Frozen stage plan:\n{stage_plan_text}\n\n"
             f"Stage repetition warnings:\n{repeat_warning_text}\n\n"
@@ -799,11 +939,15 @@ class AndroidTaskPlanner:
             f"{memory_text if memory_text else 'None'}\n\n"
             "Planner instruction:\n"
             "- The frozen stage plan already describes the whole task. Do not rewrite it in this call.\n"
+            "- If adjacent frozen stages are over-fine field-level milestones on the same screen, you may execute them together in one subtask.\n"
+            "- If you do that, keep current_stage_id as the earliest merged stage id and return covered_stage_ids as the exact contiguous frozen stage ids advanced by this subtask.\n"
+            "- Do not create separate subtasks for same-form fields such as name and phone unless task history shows a specific field failed.\n"
             "- First determine which frozen milestones are directly supported by the current screen.\n"
             "- Then choose the earliest existing stage that is not yet directly satisfied.\n"
             "- Then return 1-2 subtasks that advance that stage.\n"
             "- Consider complete_goal only as an exception after the previous three checks.\n"
             "- If you return set_tasks, you must return current_stage_id and at least one task.\n"
+            "- Return covered_stage_ids only when one subtask intentionally advances multiple adjacent frozen stages.\n"
             "- Every step must use 'Precondition: ... Goal: ...'.\n"
             "- Do not output low-level actions or atomic UI operations.\n"
             "- Each goal should be a short, functional objective.\n"
@@ -817,6 +961,7 @@ class AndroidTaskPlanner:
             "- If the current screen is already on a form or detail page, do not fall back to navigation-stage subtasks.\n"
             "- If you think of a tap, click, press, select, long press, scroll, or type action, rewrite it as the milestone state that action is meant to achieve before you output the task.\n"
             "- Ensure current_stage_id and the returned tasks describe the same milestone.\n"
+            "- If covered_stage_ids is present, it must include current_stage_id and every listed stage must match the returned subtask semantically.\n"
             "- If the current screen already satisfies one stage's success signal, choose the next unmet stage.\n"
             "- If the current screen seems surprising but there is no explicit repair or state-loss evidence in history, interpret it using the frozen milestones instead of inventing a new plan.\n"
             "- If the screen is unstable, degraded, or ambiguous, prefer a safer recovery or navigation objective instead of assuming success.\n"
@@ -853,7 +998,6 @@ class AndroidTaskPlanner:
             f"- Screen size: {json.dumps(screen_size, ensure_ascii=False)}\n"
             "- You are given both the raw screenshot and the labeled screenshot in this message.\n\n"
             f"Visible UI elements summary:\n{ui_description}\n\n"
-            f"Visible UI elements JSON:\n{ui_json}\n\n"
             f"Complete task history:\n{history_text}\n\n"
             f"Remembered stage plan:\n{stage_plan_text}\n\n"
             f"Stage repetition warnings:\n{repeat_warning_text}\n\n"
@@ -961,6 +1105,7 @@ class AndroidTaskPlanner:
             return "None"
         stage_plan = recent_stage_entry.get("stage_plan") or []
         current_stage_id = recent_stage_entry.get("current_stage_id")
+        covered_stage_ids = recent_stage_entry.get("covered_stage_ids") or []
         lines = []
         for stage in stage_plan:
             lines.append(
@@ -968,6 +1113,8 @@ class AndroidTaskPlanner:
                 f"(success signal: {stage.get('success_signal')})"
             )
         lines.append(f"- Last known current stage: {current_stage_id if current_stage_id is not None else 'Unknown'}")
+        if covered_stage_ids:
+            lines.append(f"- Last covered stages: {covered_stage_ids}")
         return "\n".join(lines) if lines else "None"
 
     @staticmethod
@@ -1153,34 +1300,53 @@ def parse_precondition_goal(task_text: str) -> tuple[str, str] | None:
     return precondition, goal
 
 
-def parse_stage_plan_payload(payload: dict[str, Any]) -> tuple[list[PlannerStage], int | None, str | None]:
+def synthesize_precondition_goal_task(task_text: str) -> str | None:
+    stripped = str(task_text or "").strip()
+    if not stripped:
+        return None
+    if re.search(r"\bprecondition\s*:", stripped, flags=re.IGNORECASE):
+        return None
+    if re.search(r"\bgoal\s*:", stripped, flags=re.IGNORECASE):
+        return None
+    return f"Precondition: None. Goal: {stripped}"
+
+
+def parse_stage_plan_payload(payload: dict[str, Any]) -> tuple[list[PlannerStage], int | None, list[int], str | None]:
     stage_plan_payload = payload.get("stage_plan")
     current_stage_id = payload.get("current_stage_id")
+    covered_stage_ids_payload = payload.get("covered_stage_ids")
     if stage_plan_payload is None:
         if current_stage_id is not None and not isinstance(current_stage_id, int):
-            return [], None, "Planner current_stage_id must be an integer when provided."
-        return [], current_stage_id, None
+            return [], None, [], "Planner current_stage_id must be an integer when provided."
+        covered_stage_ids, covered_error = _parse_covered_stage_ids(
+            covered_stage_ids_payload,
+            current_stage_id=current_stage_id,
+            valid_stage_ids=None,
+        )
+        if covered_error is not None:
+            return [], None, [], covered_error
+        return [], current_stage_id, covered_stage_ids, None
     if not isinstance(stage_plan_payload, list) or not 1 <= len(stage_plan_payload) <= 5:
-        return [], None, "Planner stage_plan must be a list with 1-5 stages."
+        return [], None, [], "Planner stage_plan must be a list with 1-5 stages."
 
     stage_plan: list[PlannerStage] = []
     seen_ids: set[int] = set()
     for index, item in enumerate(stage_plan_payload):
         if not isinstance(item, dict):
-            return [], None, f"Planner stage_plan item at index {index} is not an object."
+            return [], None, [], f"Planner stage_plan item at index {index} is not an object."
         stage_id = item.get("stage_id")
         title = item.get("title")
         success_signal = item.get("success_signal")
         if not isinstance(stage_id, int):
-            return [], None, f"Planner stage_plan item at index {index} must include integer stage_id."
+            return [], None, [], f"Planner stage_plan item at index {index} must include integer stage_id."
         if stage_id in seen_ids:
-            return [], None, f"Planner stage_plan contains duplicate stage_id {stage_id}."
+            return [], None, [], f"Planner stage_plan contains duplicate stage_id {stage_id}."
         if not isinstance(title, str) or not title.strip():
-            return [], None, f"Planner stage_plan item at index {index} is missing title."
+            return [], None, [], f"Planner stage_plan item at index {index} is missing title."
         if not isinstance(success_signal, str) or not success_signal.strip():
-            return [], None, f"Planner stage_plan item at index {index} is missing success_signal."
+            return [], None, [], f"Planner stage_plan item at index {index} is missing success_signal."
         if _is_low_level_stage_title(title):
-            return [], None, f"Planner stage title must be a high-level milestone, not a low-level action: {title!r}."
+            return [], None, [], f"Planner stage title must be a high-level milestone, not a low-level action: {title!r}."
         stage_plan.append(
             PlannerStage(
                 stage_id=stage_id,
@@ -1192,31 +1358,58 @@ def parse_stage_plan_payload(payload: dict[str, Any]) -> tuple[list[PlannerStage
 
     if current_stage_id is not None:
         if not isinstance(current_stage_id, int):
-            return [], None, "Planner current_stage_id must be an integer when provided."
+            return [], None, [], "Planner current_stage_id must be an integer when provided."
         if current_stage_id not in seen_ids:
-            return [], None, f"Planner current_stage_id {current_stage_id} does not exist in stage_plan."
-    return stage_plan, current_stage_id, None
+            return [], None, [], f"Planner current_stage_id {current_stage_id} does not exist in stage_plan."
+    covered_stage_ids, covered_error = _parse_covered_stage_ids(
+        covered_stage_ids_payload,
+        current_stage_id=current_stage_id,
+        valid_stage_ids=seen_ids,
+    )
+    if covered_error is not None:
+        return [], None, [], covered_error
+    return stage_plan, current_stage_id, covered_stage_ids, None
 
 
 def _is_low_level_stage_title(title: str) -> bool:
     lowered = title.strip().lower()
-    low_level_markers = (
+    low_level_action_markers = (
         "click ",
         "tap ",
-        "type ",
-        "input ",
         "swipe ",
         "scroll ",
         "press ",
+        "long press ",
     )
-    field_markers = (
-        "first name field",
-        "last name field",
-        "phone field",
-        "contacts tab",
-        "create new contact button",
-    )
-    return any(marker in lowered for marker in low_level_markers) or any(marker in lowered for marker in field_markers)
+
+    return any(lowered.startswith(marker) for marker in low_level_action_markers)
+
+
+def _parse_covered_stage_ids(
+    covered_stage_ids_payload: Any,
+    *,
+    current_stage_id: int | None,
+    valid_stage_ids: set[int] | None,
+) -> tuple[list[int], str | None]:
+    if covered_stage_ids_payload is None:
+        return [], None
+    if not isinstance(covered_stage_ids_payload, list) or not covered_stage_ids_payload:
+        return [], "Planner covered_stage_ids must be a non-empty list of integers when provided."
+    if not all(isinstance(stage_id, int) for stage_id in covered_stage_ids_payload):
+        return [], "Planner covered_stage_ids must contain only integers."
+
+    covered_stage_ids = list(covered_stage_ids_payload)
+    if len(set(covered_stage_ids)) != len(covered_stage_ids):
+        return [], "Planner covered_stage_ids must not contain duplicates."
+    if covered_stage_ids != sorted(covered_stage_ids):
+        return [], "Planner covered_stage_ids must be sorted in ascending order."
+    if any(right - left != 1 for left, right in zip(covered_stage_ids, covered_stage_ids[1:])):
+        return [], "Planner covered_stage_ids must contain only contiguous adjacent stage ids."
+    if current_stage_id is not None and current_stage_id not in covered_stage_ids:
+        return [], "Planner covered_stage_ids must include current_stage_id."
+    if valid_stage_ids is not None and any(stage_id not in valid_stage_ids for stage_id in covered_stage_ids):
+        return [], "Planner covered_stage_ids must only reference stage ids from stage_plan."
+    return covered_stage_ids, None
 
 
 def synthesize_subtask_from_stage_plan(

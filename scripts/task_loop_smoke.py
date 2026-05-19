@@ -23,6 +23,12 @@ from dms_reproduction.envs.android_world_adapter import AndroidWorldObservationA
 from dms_reproduction.envs.observation_utils import save_base64_png
 from dms_reproduction.llm.base_client import OpenAICompatibleConfig
 from dms_reproduction.llm.openai_compatible import OpenAICompatibleClient
+from dms_reproduction.memory import (
+    OpenAICompatibleEmbeddingConfig,
+    OpenAICompatibleEmbeddingProvider,
+    StaticMemoryConfig,
+    StaticMemoryProvider,
+)
 from scripts.planner_smoke import (
     DEFAULT_A11Y_APK,
     ensure_emulator_running,
@@ -75,9 +81,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_ui_elements", type=int, default=50)
 
     parser.add_argument("--max_planner_rounds", type=int, default=5)
-    parser.add_argument("--max_actor_steps", type=int, default=8)
+    parser.add_argument("--max_actor_steps", type=int, default=6)
     parser.add_argument("--max_total_actor_steps", type=int, default=40)
+    parser.add_argument("--use_static_memory", action="store_true")
+    parser.add_argument("--static_memory_path", default="memory_bank/static_memory.jsonl")
+    parser.add_argument("--static_memory_top_k", type=int, default=3)
+    parser.add_argument(
+        "--static_memory_retrieval_mode",
+        default="lexical_jaccard",
+        choices=["lexical_jaccard", "embedding_product", "embedding_weighted_sum"],
+    )
+    parser.add_argument("--embedding_base_url", default="")
+    parser.add_argument("--embedding_api_key", default="")
+    parser.add_argument("--embedding_model", default="")
+    parser.add_argument("--embedding_timeout", type=int, default=120)
     return parser.parse_args()
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if (
+        args.use_static_memory
+        and args.static_memory_retrieval_mode != "lexical_jaccard"
+    ):
+        if not str(args.embedding_model or "").strip():
+            raise ValueError(
+                "--embedding_model is required when static memory retrieval mode uses embeddings."
+            )
+        embedding_base_url = str(args.embedding_base_url or args.base_url or "").strip()
+        if not embedding_base_url:
+            raise ValueError(
+                "--embedding_base_url or --base_url is required when static memory retrieval mode uses embeddings."
+            )
 
 
 def make_run_dir(output_dir: str, task: str) -> Path:
@@ -628,6 +662,7 @@ def write_initial_stage_plan_artifacts(run_dir: Path, initial_stage_plan_record:
     }
 
 def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
+    validate_args(args)
     run_dir = make_run_dir(args.output_dir, args.task)
     meta = build_meta(run_dir, args)
     tunnel_process = None
@@ -672,11 +707,32 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             ),
         )
         adapter = AndroidWorldObservationAdapter(max_ui_elements=args.max_ui_elements)
+        memory_provider = None
+        if args.use_static_memory:
+            embedding_provider = None
+            if args.static_memory_retrieval_mode != "lexical_jaccard":
+                embedding_provider = OpenAICompatibleEmbeddingProvider(
+                    OpenAICompatibleEmbeddingConfig(
+                        base_url=str(args.embedding_base_url or args.base_url),
+                        api_key=str(args.embedding_api_key or args.api_key),
+                        model=args.embedding_model,
+                        timeout=args.embedding_timeout,
+                    )
+                )
+            memory_provider = StaticMemoryProvider(
+                StaticMemoryConfig(
+                    file_path=args.static_memory_path,
+                    top_k=args.static_memory_top_k,
+                    retrieval_mode=args.static_memory_retrieval_mode,
+                ),
+                embedding_provider=embedding_provider,
+            )
         runner = AndroidTaskRunner(
             planner=planner,
             actor=actor,
             verifier=verifier,
             observation_adapter=adapter,
+            memory_provider=memory_provider,
             config=TaskRunConfig(
                 max_planner_rounds=args.max_planner_rounds,
                 max_total_actor_steps=args.max_total_actor_steps,

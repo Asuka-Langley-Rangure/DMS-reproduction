@@ -20,6 +20,7 @@ class VerifierConfig:
     max_ui_json_chars: int = 12000
     max_memory_context_chars: int = 6000
     temperature: float = 0.0
+    prompt_profile: Literal["current_json", "paper_history_first"] = "paper_history_first"
 
 
 @dataclass
@@ -65,6 +66,14 @@ class AndroidVerifier:
         self.config = config or VerifierConfig()
 
     def build_messages(self, request: VerifierRequest) -> List[Dict[str, Any]]:
+        if self.config.prompt_profile == "paper_history_first":
+            return [
+                {
+                    "role": "system",
+                    "content": "You are an Android subtask verifier. Return only the final JSON verdict.",
+                },
+                {"role": "user", "content": self._build_example_prompt(request)},
+            ]
         return [
             {"role": "system", "content": self._build_system_prompt()},
             {"role": "user", "content": self._build_user_prompt(request)},
@@ -100,10 +109,12 @@ class AndroidVerifier:
                 messages=messages_jsonable,
             )
         try:
+            status = _parse_verifier_status(parsed)
+            memory_eligible = _derive_memory_eligible(parsed, status)
             return VerifierResult(
-                status=_parse_status(parsed.get("status")),
+                status=status,
                 reason=str(parsed.get("reason", "")).strip() or "No verifier reason provided.",
-                memory_eligible=bool(parsed.get("memory_eligible", False)),
+                memory_eligible=memory_eligible,
                 raw_response=raw_response,
                 parse_error=None,
                 prompt_text=prompt_text,
@@ -158,6 +169,84 @@ class AndroidVerifier:
             f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
             "Judge whether the subtask is already completed."
         )
+    
+    def _build_example_prompt(self, request: VerifierRequest) -> str:
+        evidence_observation = request.evidence_observation or {}
+        request_context = "\n\n".join(
+            [
+                f"Current Subtask:\n{request.subtask}",
+                f"Evidence Source:\n{request.evidence_source}",
+                f"Execution History:\n{self._format_history(request.action_history)}",
+                f"Before Observation:\n{self._format_observation(request.before_observation)}",
+                f"Evidence Observation:\n{self._format_observation(evidence_observation)}",
+                "Retrieved Memory Context:\n"
+                f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}",
+            ]
+        )
+
+        role = (
+            "Role: You are an expert Android Task Verifier. "
+            "Your job is to determine if the agent's execution history "
+            "successfully achieved the user's goal."
+        )
+
+        input_info = """
+    Input Information:
+
+    1. Original Goal: The user's original objective.
+
+    2. Execution History: The (Thought, json) steps the agent claims it just performed.
+    This is your PRIMARY source of truth.
+
+    3. Final Screenshot: The ground truth screenshot.
+    This is your SECONDARY check for contradictions.
+    """.strip()
+
+        verification_logic = """
+    YOUR VERIFICATION LOGIC (History-First):
+
+    1. Analyze History (Trust):
+    Read the Execution History. Did the agent perform the logical actions required to complete the Original Goal?
+    For example, for "Save recording," did the agent tap("Save")?
+
+    2. Assume Success:
+    If the history looks correct, your default verdict is: {"verified_success": true}
+
+    3. Visual Veto (Contradiction Check):
+    Now, look at the Final Screenshot. Does this screenshot explicitly contradict the agent's claim of success?
+    """.strip()
+
+        contradiction_rules = """
+    Contradiction examples that should lead to failure:
+    - The screenshot shows an error message, such as "Password incorrect".
+    - The screenshot shows the agent is in the wrong application.
+    - The goal was "Dismiss the OK dialog", but the screenshot clearly shows the OK dialog is still visible.
+
+    No-contradiction examples that should lead to success:
+    - The goal was "Dismiss the OK dialog", and the screenshot shows the dialog is gone.
+    - The goal was "Click the Save button", and the screenshot shows the app has moved to a different screen.
+    """.strip()
+
+        key_rule = """
+    Key Rule:
+    You must default to True, meaning success, if the history is sound AND the screenshot does not provide strong, undeniable proof of failure.
+    """.strip()
+
+        output_format = """
+    Output Format:
+    Respond ONLY with the JSON object:
+    {"verified_success": <bool>, "reason": "<string>"}
+    """.strip()
+
+        return "\n\n".join([
+            request_context,
+            role,
+            input_info,
+            verification_logic,
+            contradiction_rules,
+            key_rule,
+            output_format,
+        ])
 
     def _format_observation(self, observation: Dict[str, Any]) -> str:
         if not observation:
@@ -206,6 +295,23 @@ def _parse_status(value: Any) -> VerifierStatus:
     if status not in {"success", "failure", "uncertain"}:
         raise ValueError("verifier.status must be one of success/failure/uncertain.")
     return status  # type: ignore[return-value]
+
+
+def _parse_verifier_status(parsed: Dict[str, Any]) -> VerifierStatus:
+    if "status" in parsed:
+        return _parse_status(parsed.get("status"))
+    if "verified_success" in parsed:
+        verified_success = parsed.get("verified_success")
+        if isinstance(verified_success, bool):
+            return "success" if verified_success else "failure"
+        raise ValueError("verifier.verified_success must be a boolean.")
+    raise ValueError("verifier response must include either status or verified_success.")
+
+
+def _derive_memory_eligible(parsed: Dict[str, Any], status: VerifierStatus) -> bool:
+    if "memory_eligible" in parsed:
+        return bool(parsed.get("memory_eligible"))
+    return status == "success"
 
 
 def extract_json_object(text: str) -> Optional[dict]:

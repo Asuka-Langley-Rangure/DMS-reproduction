@@ -6,7 +6,6 @@ from dms_reproduction.agents.planner import (
     AndroidTaskPlanner,
     PlannerConfig,
     PlannerResult,
-    PlannerStage,
     extract_json_object,
     parse_precondition_goal,
 )
@@ -90,38 +89,39 @@ class PlannerPromptTest(unittest.TestCase):
         system_prompt = llm.messages[0]["content"]
         user_prompt = extract_user_text(llm.messages)
         self.assertIn("You are an Android Task Planner", system_prompt)
-        self.assertIn("Delete target_file.mp3 from the device", user_prompt)
-        self.assertIn("Current activity", user_prompt)
-        self.assertIn("Visible UI elements JSON", user_prompt)
-        self.assertIn("Complete task history", user_prompt)
-        self.assertIn("Retrieved memory context", user_prompt)
-        self.assertIn("The frozen stage plan already describes the whole task", user_prompt)
-        self.assertIn("Precondition: ... Goal: ...", system_prompt)
-        self.assertIn("checkable state change after completion", user_prompt)
-        self.assertIn("2-6 atomic actions", system_prompt)
-        self.assertIn("Use task history to avoid repeating failed or no-progress strategies", system_prompt)
-        self.assertIn("Return complete_goal only if the current screen directly shows the final requested result", user_prompt)
-        self.assertIn("Consider complete_goal only as an exception after the previous three checks", user_prompt)
-        self.assertIn("Then choose the earliest existing stage that is not yet directly satisfied", user_prompt)
         self.assertIn("a frozen whole-task stage plan already exists", system_prompt)
-        self.assertIn("current_stage_id", system_prompt)
+        self.assertIn("Delete target_file.mp3 from the device", user_prompt)
+        self.assertIn("You are an Android Task Planner. Your job is to create short, functional plans", user_prompt)
+        self.assertIn("User's Overall Goal", user_prompt)
+        self.assertIn("Current Device State", user_prompt)
+        self.assertIn("Current activity", user_prompt)
+        self.assertIn("Visible UI elements summary", user_prompt)
+        self.assertNotIn("Visible UI elements JSON", user_prompt)
+        self.assertIn("Complete Task History", user_prompt)
+        self.assertIn("Retrieved memory context", user_prompt)
         self.assertIn("Frozen stage plan", user_prompt)
-        self.assertIn("Contextual planning hints", user_prompt)
-        self.assertIn("Use only the provided stage plan when choosing current_stage_id", system_prompt)
-        self.assertIn("Choose the earliest stage that is not yet directly satisfied", system_prompt)
-        self.assertIn("Default to one main subtask", system_prompt)
-        self.assertIn("Do not repeat the same task wording multiple times in one response", system_prompt)
-        self.assertIn("rewrite it as the state change or functional result", system_prompt)
+        self.assertIn("Your Task", user_prompt)
+        self.assertIn("Step Format", user_prompt)
+        self.assertIn("Your Output", user_prompt)
+        self.assertIn("Memory Persistence", user_prompt)
+        self.assertIn("System Compatibility Constraints", user_prompt)
+        self.assertIn("The frozen stage plan already describes the whole task", user_prompt)
+        self.assertIn("Precondition: ... Goal: ...", user_prompt)
+        self.assertIn("checkable state change after completion", user_prompt)
+        self.assertIn("Use task history to avoid repeating failed or no-progress strategies", user_prompt)
+        self.assertIn("Then choose the earliest existing stage that is not yet directly satisfied", user_prompt)
+        self.assertIn("Use the frozen stage plan when choosing current_stage_id", user_prompt)
+        self.assertIn("Default to one main subtask", user_prompt)
         self.assertIn("Ensure current_stage_id and the returned tasks describe the same milestone", user_prompt)
-        self.assertIn("must return current_stage_id and at least one task", user_prompt)
+        self.assertIn('"tool":"set_tasks","current_stage_id":1', user_prompt)
+        self.assertIn("covered_stage_ids", user_prompt)
         self.assertIn("Do not return duplicate or near-duplicate tasks", user_prompt)
         self.assertIn("rewrite it as the milestone state", user_prompt)
         self.assertIn("planner_complete_but_task_check_failed", user_prompt)
-        self.assertIn("complete_goal is only a completion candidate", system_prompt)
         self.assertNotIn("Contact creation:", system_prompt)
         self.assertNotIn("Mia Garcia", system_prompt)
         self.assertNotIn("contact creation entry point", user_prompt.lower())
-        self.assertNotIn("Available Specialized Agents", system_prompt)
+        self.assertNotIn("Available Specialized Agents", user_prompt)
         image_items = extract_image_items(llm.messages)
         self.assertEqual(len(image_items), 1)
         self.assertIn("data:image/png;base64,BBB", image_items[0]["image_url"]["url"])
@@ -147,7 +147,8 @@ class PlannerPromptTest(unittest.TestCase):
         )
 
         user_prompt = extract_user_text(llm.messages)
-        self.assertIn("confirmation or finalization", user_prompt)
+        self.assertIn("Focus on what to achieve, not how", user_prompt)
+        self.assertIn("Current Device State", user_prompt)
         self.assertNotIn("contact editor", user_prompt.lower())
         self.assertNotIn("create-contact", user_prompt.lower())
         self.assertNotIn("fill in <name>", user_prompt.lower())
@@ -217,6 +218,7 @@ class PlannerParsingTest(unittest.TestCase):
         self.assertEqual(len(result.subtasks), 1)
         self.assertEqual(len(result.stage_plan), 2)
         self.assertEqual(result.current_stage_id, 2)
+        self.assertEqual(result.covered_stage_ids, [])
         self.assertEqual(result.subtasks[0].precondition, "Contacts app is open")
         self.assertEqual(result.subtasks[0].goal, "Tap create contact flow")
         self.assertEqual(result.subtasks[0].agent, "android_actor")
@@ -242,6 +244,7 @@ class PlannerParsingTest(unittest.TestCase):
         self.assertFalse(result.is_goal_complete)
         self.assertEqual(result.stage_plan, [])
         self.assertEqual(result.current_stage_id, 2)
+        self.assertEqual(result.covered_stage_ids, [])
 
     def test_parse_invalid_current_stage_id(self) -> None:
         raw = (
@@ -260,6 +263,22 @@ class PlannerParsingTest(unittest.TestCase):
         self.assertIn("Precondition: ... Goal: ...", result.parse_error or "")
         self.assertEqual(result.parse_error_code, "planner_task_format_invalid")
 
+    def test_parse_legacy_single_sentence_task_is_repaired_with_none_precondition(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","current_stage_id":1,"tasks":['
+            '{"task":"Open the Contacts app.","reason":"Need to begin contact creation"}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIsNone(result.parse_error)
+        self.assertTrue(result.repaired_parse)
+        self.assertEqual(
+            result.repair_reason,
+            "synthesized_precondition_none_for_legacy_task_text",
+        )
+        self.assertEqual(len(result.subtasks), 1)
+        self.assertEqual(result.subtasks[0].precondition, "None.")
+        self.assertEqual(result.subtasks[0].goal, "Open the Contacts app.")
+
     def test_parse_stage_plan_response_requires_three_to_five_stages(self) -> None:
         raw = '{"stage_plan":[{"stage_id":1,"title":"Open the target app","success_signal":"App is open"}]}'
         result = self.planner.parse_stage_plan_response(raw)
@@ -275,13 +294,59 @@ class PlannerParsingTest(unittest.TestCase):
         self.assertIsNone(result.parse_error)
         self.assertEqual(len(result.stage_plan), 3)
 
-    def test_parse_stage_plan_rejects_low_level_stage_title(self) -> None:
+    def test_parse_stage_plan_accepts_widget_level_title_without_atomic_gui_verb(self) -> None:
         raw = (
-            '{"tool":"set_tasks","stage_plan":[{"stage_id":1,"title":"Click the Contacts tab","success_signal":"Contacts tab is selected"}],'
+            '{"tool":"set_tasks","stage_plan":[{"stage_id":1,"title":"Reach the Contacts tab","success_signal":"Contacts tab is selected"}],'
             '"current_stage_id":1,"tasks":[{"task":"Precondition: None Goal: Reach the contacts section","reason":"Need contacts"}]}'
         )
         result = self.planner.parse_response(raw)
+        self.assertIsNone(result.parse_error)
+
+    def test_parse_stage_plan_rejects_atomic_gui_verb_title(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","stage_plan":[{"stage_id":1,"title":"Tap the save button","success_signal":"The save button was tapped"}],'
+            '"current_stage_id":1,"tasks":[{"task":"Precondition: None Goal: Save the current form","reason":"Need save"}]}'
+        )
+        result = self.planner.parse_response(raw)
         self.assertIn("high-level milestone", result.parse_error or "")
+
+    def test_parse_set_tasks_preserves_covered_stage_ids(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","stage_plan":['
+            '{"stage_id":1,"title":"Open the Phone app","success_signal":"Phone app is foreground"},'
+            '{"stage_id":2,"title":"Reach the contact creation entry point","success_signal":"Create contact UI is visible"},'
+            '{"stage_id":3,"title":"Fill required contact fields","success_signal":"Required fields are populated"}],'
+            '"current_stage_id":2,"covered_stage_ids":[2,3],"tasks":['
+            '{"task":"Precondition: Phone app is open Goal: Reach and use the contact creation flow","reason":"Need the entry point and visible form"}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIsNone(result.parse_error)
+        self.assertEqual(result.current_stage_id, 2)
+        self.assertEqual(result.covered_stage_ids, [2, 3])
+
+    def test_parse_set_tasks_rejects_covered_stage_ids_missing_current_stage_id(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","stage_plan":['
+            '{"stage_id":1,"title":"Open the Phone app","success_signal":"Phone app is foreground"},'
+            '{"stage_id":2,"title":"Reach the contact creation entry point","success_signal":"Create contact UI is visible"},'
+            '{"stage_id":3,"title":"Fill required contact fields","success_signal":"Required fields are populated"}],'
+            '"current_stage_id":2,"covered_stage_ids":[3],"tasks":['
+            '{"task":"Precondition: Phone app is open Goal: Reach the contact form","reason":"Need the next stage"}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIn("must include current_stage_id", result.parse_error or "")
+
+    def test_parse_set_tasks_rejects_non_contiguous_covered_stage_ids(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","stage_plan":['
+            '{"stage_id":1,"title":"Open the Phone app","success_signal":"Phone app is foreground"},'
+            '{"stage_id":2,"title":"Reach the contact creation entry point","success_signal":"Create contact UI is visible"},'
+            '{"stage_id":3,"title":"Fill required contact fields","success_signal":"Required fields are populated"}],'
+            '"current_stage_id":1,"covered_stage_ids":[1,3],"tasks":['
+            '{"task":"Precondition: None Goal: Open and prepare contact creation","reason":"Need staged progress"}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIn("contiguous adjacent stage ids", result.parse_error or "")
 
     def test_parse_stage_plan_without_tasks_synthesizes_current_stage_subtask(self) -> None:
         raw = (
@@ -306,7 +371,10 @@ class PlannerParsingTest(unittest.TestCase):
     def test_parse_missing_precondition_goal_format(self) -> None:
         raw = '{"tool":"set_tasks","tasks":[{"task":"Open app","reason":"Need to start"}]}'
         result = self.planner.parse_response(raw)
-        self.assertIn("Precondition: ... Goal: ...", result.parse_error or "")
+        self.assertIsNone(result.parse_error)
+        self.assertTrue(result.repaired_parse)
+        self.assertEqual(result.subtasks[0].precondition, "None.")
+        self.assertEqual(result.subtasks[0].goal, "Open app")
 
     def test_extract_json_object_handles_markdown_fence(self) -> None:
         raw = '```json\n{"tool":"complete_goal","message":"ok"}\n```'

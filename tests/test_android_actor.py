@@ -140,18 +140,20 @@ class ActorPromptTest(unittest.TestCase):
 
         self.assertIn("You are an Android Actor", system_prompt)
         self.assertIn("You are not responsible for re-planning", system_prompt)
-        self.assertIn("Subtask:", user_prompt)
-        self.assertIn("Current screen state", user_prompt)
+        self.assertIn("Current subtask:", user_prompt)
+        self.assertIn("Current device state", user_prompt)
         self.assertIn("Foreground package", user_prompt)
         self.assertIn("Dominant visible UI package", user_prompt)
-        self.assertIn("Visible UI elements JSON", user_prompt)
         self.assertIn("Visible UI index table", user_prompt)
+        self.assertIn("Visible UI elements summary", user_prompt)
         self.assertIn("[#0]", user_prompt)
-        self.assertIn("Recent action history", user_prompt)
+        self.assertIn("Recent execution history", user_prompt)
         self.assertIn("Retrieved memory context", user_prompt)
-        self.assertIn("Prefer the smallest action that advances the current subtask", user_prompt)
-        self.assertIn("Do not perform implicit follow-up actions", user_prompt)
-        self.assertNotIn("functional steps", user_prompt)
+        self.assertIn("Execute exactly one GUI action at a time", user_prompt)
+        self.assertIn("Treat the Goal as the primary grounding target", user_prompt)
+        self.assertIn("'+', 'Create contact', 'Add contact', and 'New contact'", user_prompt)
+        self.assertIn("Return exactly one action in the required JSON action format", user_prompt)
+        self.assertNotIn("Visible UI elements JSON", user_prompt)
 
     def test_prompt_includes_observation_warning(self) -> None:
         llm = FakeLLMClient(['Reason: wait.\nAction: {"action_type":"wait"}'])
@@ -170,6 +172,7 @@ class ActorPromptTest(unittest.TestCase):
         user_prompt = extract_user_text(actor.build_messages(request))
         self.assertIn("Observation warning", user_prompt)
         self.assertIn("Only system UI elements were retained", user_prompt)
+        self.assertIn("prefer a cautious recovery action such as wait or navigate_back", user_prompt)
 
     def test_prompt_includes_grouped_contact_form_constraints(self) -> None:
         llm = FakeLLMClient(['Reason: fill first name.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
@@ -208,7 +211,7 @@ class ActorPromptTest(unittest.TestCase):
         user_prompt = extract_user_text(actor.build_messages(ActorRequest(subtask="Fill a form", observation=observation)))
         self.assertNotIn("Grouped contact form constraints", user_prompt)
         self.assertNotIn("Do not click Save", user_prompt)
-        self.assertIn("Do not perform implicit follow-up actions", user_prompt)
+        self.assertIn("Do not click a tab, container, or non-clickable label", user_prompt)
 
 
 class ActorActionParsingTest(unittest.TestCase):

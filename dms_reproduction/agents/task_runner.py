@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import re
 from typing import Any, Dict, List, Literal, Optional, Protocol
 
@@ -18,7 +19,12 @@ from dms_reproduction.agents.verifier import (
     VerifierRequest,
     VerifierResult,
 )
-from dms_reproduction.memory import MemoryEvent, MemoryProvider, NoOpMemoryProvider
+from dms_reproduction.memory import (
+    MemoryEvent,
+    MemoryProvider,
+    NoOpMemoryProvider,
+    StaticMemoryRecord,
+)
 
 
 TaskRunStatus = Literal[
@@ -215,6 +221,7 @@ class AndroidTaskRunner:
                 round_id=0,
                 stage_plan=remembered_stage_plan,
                 current_stage_id=None,
+                covered_stage_ids=[],
             )
 
         for round_id in range(1, self.config.max_planner_rounds + 1):
@@ -253,6 +260,7 @@ class AndroidTaskRunner:
                     round_id=round_id,
                     stage_plan=remembered_stage_plan,
                     current_stage_id=None,
+                    covered_stage_ids=[],
                 )
             planner_memory_context = self.memory_provider.build_context(
                 user_goal=user_goal,
@@ -330,18 +338,37 @@ class AndroidTaskRunner:
                         observation=observation,
                     )
                     continue
+            planner_covered_stage_ids = list(planner_result.covered_stage_ids)
+            covered_stage_ids_error = self._validate_covered_stage_ids_against_frozen_plan(
+                covered_stage_ids=planner_covered_stage_ids,
+                current_stage_id=planner_current_stage_id,
+                stage_plan=remembered_stage_plan,
+            )
+            if covered_stage_ids_error is not None:
+                round_record.replan_reason = "planner_covered_stage_ids_invalid"
+                self._append_planner_feedback_history(
+                    task_history=task_history,
+                    round_id=round_id,
+                    status="planner_covered_stage_ids_invalid",
+                    reason=covered_stage_ids_error,
+                    summary=covered_stage_ids_error,
+                    observation=observation,
+                )
+                continue
             if planner_current_stage_id is None:
                 planner_current_stage_id = remembered_current_stage_id
             if planner_current_stage_id is None and remembered_stage_plan:
                 planner_current_stage_id = remembered_stage_plan[0].stage_id
             planner_result.current_stage_id = planner_current_stage_id
+            if planner_result.current_stage_id is not None and not planner_result.covered_stage_ids:
+                planner_result.covered_stage_ids = [planner_result.current_stage_id]
             if planner_result.stage_plan:
-                remembered_current_stage_id = planner_result.current_stage_id
                 self._append_stage_plan_history(
                     task_history=task_history,
                     round_id=round_id,
                     stage_plan=planner_result.stage_plan,
                     current_stage_id=planner_result.current_stage_id,
+                    covered_stage_ids=planner_result.covered_stage_ids,
                 )
             round_record.planner_result = planner_result.to_dict()
 
@@ -437,8 +464,9 @@ class AndroidTaskRunner:
                         ),
                     )
 
-                actor_memory_context = self.memory_provider.build_context(
+                actor_memory_context = self.memory_provider.build_actor_context(
                     user_goal=user_goal,
+                    subtask=subtask.task,
                     observation=observation,
                     task_history=task_history,
                 )
@@ -566,9 +594,22 @@ class AndroidTaskRunner:
                 if subtask_completed:
                     recent_completed_subtasks[subtask.task] = recent_completed_subtasks.get(subtask.task, 0) + 1
                     normalized_subtask_progress[subtask.task] = normalized_subtask_progress.get(subtask.task, 0) + 1
+                    remembered_current_stage_id = self._next_stage_id_after_covered(
+                        planner_result.covered_stage_ids,
+                        remembered_stage_plan,
+                    )
+                    if planner_result.stage_plan:
+                        self._append_stage_plan_history(
+                            task_history=task_history,
+                            round_id=round_id,
+                            stage_plan=planner_result.stage_plan,
+                            current_stage_id=remembered_current_stage_id,
+                            covered_stage_ids=planner_result.covered_stage_ids,
+                        )
                 else:
                     recent_completed_subtasks[subtask.task] = 0
                     normalized_subtask_progress[subtask.task] = normalized_subtask_progress.get(subtask.task, 0) + 1
+                    remembered_current_stage_id = planner_result.current_stage_id
 
                 degraded_replan_reason = self._degraded_observation_reason(observation)
                 suspicious_completion = self._suspicious_completion_reason(
@@ -931,11 +972,12 @@ class AndroidTaskRunner:
                 subtask=subtask.task,
                 observation=refreshed_observation,
                 action_history=task_history,
-                memory_context=self.memory_provider.build_context(
-                    user_goal=user_goal,
-                    observation=refreshed_observation,
-                    task_history=task_history,
-                ),
+                    memory_context=self.memory_provider.build_actor_context(
+                        user_goal=user_goal,
+                        subtask=subtask.task,
+                        observation=refreshed_observation,
+                        task_history=task_history,
+                    ),
             ),
             self.observation_adapter,
         )
@@ -1270,6 +1312,7 @@ class AndroidTaskRunner:
         round_id: int,
         stage_plan: list[PlannerStage],
         current_stage_id: int | None,
+        covered_stage_ids: list[int] | None,
     ) -> None:
         task_history.append(
             {
@@ -1277,10 +1320,47 @@ class AndroidTaskRunner:
                 "round_id": round_id,
                 "stage_plan": [stage.to_dict() for stage in stage_plan],
                 "current_stage_id": current_stage_id,
+                "covered_stage_ids": list(covered_stage_ids or []),
                 "status": "planner_stage_plan",
                 "summary": f"Remembered stage plan with {len(stage_plan)} stages.",
             }
         )
+
+    @staticmethod
+    def _validate_covered_stage_ids_against_frozen_plan(
+        *,
+        covered_stage_ids: list[int],
+        current_stage_id: int | None,
+        stage_plan: list[PlannerStage],
+    ) -> str | None:
+        if not covered_stage_ids:
+            return None
+        if current_stage_id is None:
+            return "Planner returned covered_stage_ids without current_stage_id."
+        if current_stage_id not in covered_stage_ids:
+            return "Planner covered_stage_ids must include current_stage_id."
+        valid_stage_ids = {stage.stage_id for stage in stage_plan}
+        invalid_stage_ids = [stage_id for stage_id in covered_stage_ids if stage_id not in valid_stage_ids]
+        if invalid_stage_ids:
+            return (
+                "Planner covered_stage_ids must only reference stages from the frozen stage plan. "
+                f"Invalid stage ids: {invalid_stage_ids}."
+            )
+        return None
+
+    @staticmethod
+    def _next_stage_id_after_covered(
+        covered_stage_ids: list[int],
+        stage_plan: list[PlannerStage],
+    ) -> int | None:
+        if not covered_stage_ids:
+            return None
+        ordered_stage_ids = [stage.stage_id for stage in stage_plan]
+        last_covered_stage_id = max(covered_stage_ids)
+        for stage_id in ordered_stage_ids:
+            if stage_id > last_covered_stage_id:
+                return stage_id
+        return last_covered_stage_id
 
     @staticmethod
     def _normalize_planner_subtasks(
@@ -1399,6 +1479,60 @@ class AndroidTaskRunner:
             },
         )
         self.memory_provider.record(event.to_dict())
+        if verifier_result.status != "success":
+            return
+        static_memory_record = self._build_static_memory_record(
+            user_goal=user_goal,
+            round_id=round_id,
+            subtask=subtask,
+            actor_result=actor_result,
+            verifier_result=verifier_result,
+            observation=observation,
+        )
+        self.memory_provider.record_subtask_trajectory(static_memory_record.to_dict())
+
+    @staticmethod
+    def _build_static_memory_record(
+        *,
+        user_goal: str,
+        round_id: int,
+        subtask: PlannerSubtask,
+        actor_result: ActorRunResult,
+        verifier_result: VerifierResult,
+        observation: dict[str, Any],
+    ) -> StaticMemoryRecord:
+        trajectory = [
+            {
+                "step_id": step.step_id,
+                "reason": step.reason,
+                "action": step.action.to_payload() if step.action else step.original_action,
+                "summary": step.summary,
+            }
+            for step in actor_result.steps
+        ]
+        return StaticMemoryRecord(
+            subtask_text=subtask.task,
+            precondition=subtask.precondition,
+            goal=subtask.goal,
+            user_goal=user_goal,
+            round_id=round_id,
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            app_name=str(observation.get("app_name") or ""),
+            current_activity=str(observation.get("current_activity") or ""),
+            verifier_status=verifier_result.status,
+            verifier_reason=verifier_result.reason,
+            completion_message=actor_result.completion_message or "",
+            trajectory=trajectory,
+            observation_digest={
+                "current_activity": observation.get("current_activity"),
+                "foreground_package": observation.get("foreground_package"),
+                "app_name": observation.get("app_name"),
+                "observation_warning": observation.get("observation_warning"),
+                "observation_consistency": observation.get("observation_consistency"),
+                "non_system_ui_count": observation.get("non_system_ui_count"),
+                "clickable_ui_count": observation.get("clickable_ui_count"),
+            },
+        )
 
     @staticmethod
     def _validate_subtasks_against_observation(

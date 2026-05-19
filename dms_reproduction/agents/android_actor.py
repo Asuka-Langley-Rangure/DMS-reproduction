@@ -576,17 +576,20 @@ class AndroidActor:
     def _build_user_prompt(self, request: ActorRequest) -> str:
         if self.config.prompt_profile == "legacy_contact_tuned":
             return self._build_legacy_user_prompt(request)
-        return self._build_generic_user_prompt(request)
+        return self._build_generic_example_prompt(request)
 
-    def _build_generic_user_prompt(self, request: ActorRequest) -> str:
+    def _build_generic_example_prompt(self, request: ActorRequest) -> str:
         observation = request.observation
         foreground_package = observation.get("foreground_package") or "Unknown"
         dominant_ui_package = observation.get("app_name") or "Unknown"
         observation_warning = observation.get("observation_warning")
         observation_consistency = observation.get("observation_consistency") or "stable"
+        memory_context = self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or "None"
         return (
-            f"Subtask:\n{request.subtask}\n\n"
-            "Current screen state:\n"
+            "Current subtask:\n"
+            f"{request.subtask}\n\n"
+            "Current device state:\n"
+            "- You are given one screenshot in this message. If available, it is the labeled screenshot with red boxes and numeric indices.\n"
             f"- Foreground package: {foreground_package}\n"
             f"- Dominant visible UI package: {dominant_ui_package}\n"
             f"- Current activity: {observation.get('current_activity') or 'Unknown'}\n"
@@ -595,26 +598,36 @@ class AndroidActor:
             f"- Clickable UI count: {observation.get('clickable_ui_count', 0)}\n"
             f"- Non-system UI count: {observation.get('non_system_ui_count', 0)}\n"
             f"- Observation consistency: {observation_consistency}\n"
-            "- You are given the labeled screenshot in this message.\n\n"
+            "\n"
             f"Observation warning:\n{observation_warning or 'None'}\n\n"
             f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
-            f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
-            f"Visible UI elements JSON:\n{self._format_ui_json(observation.get('ui_elements') or [])}\n\n"
-            f"Recent action history:\n{self._format_history(request.action_history)}\n\n"
+            f"Visible UI elements summary:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
+            f"Recent execution history:\n{self._format_history(request.action_history)}\n\n"
             "Retrieved memory context:\n"
-            f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
-            "Decision policy:\n"
-            "- Execute exactly one valid GUI action.\n"
-            "- Base the choice on the current GUI state, history, and memory.\n"
-            "- Prefer the smallest action that advances the current subtask.\n"
-            "- Use status complete only when the current subtask goal is satisfied.\n"
-            "- Do not perform implicit follow-up actions that are not required by the current subtask.\n"
-            "- If a previous action failed or produced no progress, do not repeat it unchanged.\n"
+            f"{memory_context}\n\n"
+            "Your task:\n"
+            "- Execute the current subtask on this Android screen.\n"
+            "- Output exactly one valid GUI action for the current screen.\n"
+            "- If the subtask precondition is clearly unmet on the current screen, return status infeasible.\n"
+            "- If the subtask goal is already satisfied, return status complete.\n\n"
+            "Acting rules:\n"
+            "- Execute exactly one GUI action at a time. Do not implicitly add follow-up actions.\n"
+            "- Base the decision on the current screen state, recent execution history, and retrieved memory context.\n"
+            "- Before choosing an indexed action, first identify the visible UI element that best matches the Goal of the current subtask.\n"
+            "- Treat the Goal as the primary grounding target. Use the Reason to justify the match, not to invent a different target.\n"
+            "- Match UI elements by meaning, not only by exact wording. '+', 'Create contact', 'Add contact', and 'New contact' may refer to the same creation entry point.\n"
+            "- Do not choose an index only because it is nearby, visually salient, or contains a partially related word.\n"
+            "- Do not click a tab, container, or non-clickable label unless it directly satisfies the Goal.\n"
+            "- If the Goal is to create or add a contact, prefer the visible creation entry element rather than the currently selected Contacts tab.\n"
+            "- In the Reason, explicitly name the grounded target element before giving the action.\n"
+            "- If a previous action failed or produced no progress, do not repeat it unchanged. Change strategy or return infeasible.\n"
             "- If an action causes a visible UI change, stop rather than predicting the next screen.\n"
             "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
-            "- If the observation is degraded or unstable, prefer a cautious recovery action over guessing.\n"
-            "- If the current path is blocked or not feasible, use status infeasible.\n"
-            "- Return exactly one action in the required JSON action format.\n"
+            "- If the observation is degraded or unstable, prefer a cautious recovery action such as wait or navigate_back over guessing.\n\n"
+            "Output format:\n"
+            "Reason: <brief rationale that names the grounded target element>\n"
+            'Action: {"action_type":"..."}\n'
+            "Return exactly one action in the required JSON action format."
         )
 
     def _build_legacy_user_prompt(self, request: ActorRequest) -> str:
@@ -653,7 +666,6 @@ class AndroidActor:
             f"Observation warning:\n{observation_warning or 'None'}\n\n"
             f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
             f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
-            f"Visible UI elements JSON:\n{self._format_ui_json(observation.get('ui_elements') or [])}\n\n"
             f"Recent action history:\n{self._format_history(request.action_history)}\n\n"
             "Retrieved memory context:\n"
             f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
