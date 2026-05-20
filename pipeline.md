@@ -539,6 +539,8 @@ lrwxrwxrwx 1 chencen chencen 60  5月 10 17:33 /data1/chencen/dms_qwen/models/Qw
 ```powershell
 ssh -N -L 8000:127.0.0.1:8007 chencen@114.212.165.149
 ssh -N -L 8000:127.0.0.1:8007 chencen@192.168.1.85
+ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -N -L 8000:127.0.0.1:8007 -L 19007:127.0.0.1:9007 chencen@192.168.1.85
+ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -N -L 8000:127.0.0.1:8007 -L 19007:127.0.0.1:9007 chencen@114.212.165.149
 ```
 
 #### 测试API

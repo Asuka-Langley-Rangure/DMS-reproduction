@@ -24,8 +24,11 @@ from dms_reproduction.envs.observation_utils import save_base64_png
 from dms_reproduction.llm.base_client import OpenAICompatibleConfig
 from dms_reproduction.llm.openai_compatible import OpenAICompatibleClient
 from dms_reproduction.memory import (
+    DMSMemoryConfig,
+    DMSMemoryProvider,
     OpenAICompatibleEmbeddingConfig,
     OpenAICompatibleEmbeddingProvider,
+    RetrievalConfig,
     StaticMemoryConfig,
     StaticMemoryProvider,
 )
@@ -93,6 +96,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_planner_rounds", type=int, default=5)
     parser.add_argument("--max_actor_steps", type=int, default=6)
     parser.add_argument("--max_total_actor_steps", type=int, default=40)
+    parser.add_argument(
+        "--memory_backend",
+        default="none",
+        choices=["none", "static", "dms"],
+    )
     parser.add_argument("--use_static_memory", action="store_true")
     parser.add_argument("--static_memory_path", default="memory_bank/static_memory.jsonl")
     parser.add_argument("--static_memory_top_k", type=int, default=3)
@@ -105,12 +113,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding_api_key", default="EMPTY")
     parser.add_argument("--embedding_model", default="bge-small-en-v1.5")
     parser.add_argument("--embedding_timeout", type=int, default=120)
+    parser.add_argument("--dms_memory_root", default="memory_bank/dms_memory")
+    parser.add_argument(
+        "--dms_retrieval_mode",
+        default="lexical_jaccard",
+        choices=["lexical_jaccard", "embedding_product", "embedding_weighted_sum"],
+    )
+    parser.add_argument("--dms_retrieval_top_k", type=int, default=3)
+    parser.add_argument("--dms_retrieval_threshold", type=float, default=0.45)
+    parser.add_argument("--dms_enable_mutation", action="store_true")
+    parser.add_argument("--dms_mutation_epsilon", type=float, default=0.1)
+    parser.add_argument("--dms_replace_only_if_shorter", action="store_true", default=True)
+    parser.add_argument("--dms_enable_risk_filter", action="store_true", default=True)
+    parser.add_argument("--dms_risk_threshold", type=float, default=0.70)
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    backend = args.memory_backend
+    if args.use_static_memory and backend == "none":
+        backend = "static"
+    args.memory_backend = backend
     if (
-        args.use_static_memory
+        backend == "static"
         and args.static_memory_retrieval_mode != "lexical_jaccard"
     ):
         if not str(args.embedding_model or "").strip():
@@ -121,6 +146,19 @@ def validate_args(args: argparse.Namespace) -> None:
         if not embedding_base_url:
             raise ValueError(
                 "--embedding_base_url or --base_url is required when static memory retrieval mode uses embeddings."
+            )
+    if (
+        backend == "dms"
+        and args.dms_retrieval_mode != "lexical_jaccard"
+    ):
+        if not str(args.embedding_model or "").strip():
+            raise ValueError(
+                "--embedding_model is required when DMS retrieval mode uses embeddings."
+            )
+        embedding_base_url = str(args.embedding_base_url or args.base_url or "").strip()
+        if not embedding_base_url:
+            raise ValueError(
+                "--embedding_base_url or --base_url is required when DMS retrieval mode uses embeddings."
             )
 
 
@@ -719,8 +757,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         )
         adapter = AndroidWorldObservationAdapter(max_ui_elements=args.max_ui_elements)
         memory_provider = None
-        if args.use_static_memory:
-            embedding_provider = None
+        embedding_provider = None
+        if args.memory_backend == "static":
             if args.static_memory_retrieval_mode != "lexical_jaccard":
                 embedding_provider = OpenAICompatibleEmbeddingProvider(
                     OpenAICompatibleEmbeddingConfig(
@@ -735,6 +773,33 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     file_path=args.static_memory_path,
                     top_k=args.static_memory_top_k,
                     retrieval_mode=args.static_memory_retrieval_mode,
+                ),
+                embedding_provider=embedding_provider,
+            )
+        elif args.memory_backend == "dms":
+            if args.dms_retrieval_mode != "lexical_jaccard":
+                embedding_provider = OpenAICompatibleEmbeddingProvider(
+                    OpenAICompatibleEmbeddingConfig(
+                        base_url=str(args.embedding_base_url or args.base_url),
+                        api_key=str(args.embedding_api_key or args.api_key),
+                        model=args.embedding_model,
+                        timeout=args.embedding_timeout,
+                    )
+                )
+            memory_provider = DMSMemoryProvider(
+                config=DMSMemoryConfig(
+                    memory_root=Path(args.dms_memory_root),
+                    retrieval_threshold=args.dms_retrieval_threshold,
+                    retrieval_top_k=args.dms_retrieval_top_k,
+                    enable_mutation=args.dms_enable_mutation,
+                    mutation_epsilon=args.dms_mutation_epsilon,
+                    replace_only_if_shorter=args.dms_replace_only_if_shorter,
+                    enable_risk_filter=args.dms_enable_risk_filter,
+                    risk_threshold=args.dms_risk_threshold,
+                ),
+                retriever_config=RetrievalConfig(
+                    top_k=args.dms_retrieval_top_k,
+                    retrieval_mode=args.dms_retrieval_mode,
                 ),
                 embedding_provider=embedding_provider,
             )

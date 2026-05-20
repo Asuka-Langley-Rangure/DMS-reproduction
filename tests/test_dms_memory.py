@@ -3,7 +3,12 @@ import unittest
 from pathlib import Path
 
 from dms_reproduction.memory.dms import DMSMemoryConfig, DMSMemoryProvider
+from dms_reproduction.memory.embedding import (
+    OpenAICompatibleEmbeddingConfig,
+    OpenAICompatibleEmbeddingProvider,
+)
 from dms_reproduction.memory.pruning import DMSPruner, PruningConfig
+from dms_reproduction.memory.retrieval import RetrievalConfig
 from dms_reproduction.memory.store import JsonDMSMemoryStore
 from dms_reproduction.memory.survival_value import (
     SurvivalValueCalculator,
@@ -95,6 +100,30 @@ class TestDMSMemoryModules(unittest.TestCase):
             self.assertIsInstance(calculator.compute(_make_record("mem_x"), 0), float)
             self.assertFalse(pruner.should_run(current_step=0, active_count=0))
 
+    def test_provider_accepts_embedding_retrieval_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JsonDMSMemoryStore(tmpdir)
+
+            class DummyEmbeddingProvider:
+                def embed_text(self, text: str) -> list[float]:
+                    return [0.1, 0.2]
+
+            provider = DMSMemoryProvider(
+                store=store,
+                config=DMSMemoryConfig(memory_root=Path(tmpdir)),
+                retriever_config=RetrievalConfig(retrieval_mode="embedding_product"),
+                embedding_provider=DummyEmbeddingProvider(),
+            )
+            self.assertIsNotNone(provider)
+
+            provider = DMSMemoryProvider(
+                store=store,
+                config=DMSMemoryConfig(memory_root=Path(tmpdir)),
+                retriever_config=RetrievalConfig(retrieval_mode="embedding_weighted_sum"),
+                embedding_provider=DummyEmbeddingProvider(),
+            )
+            self.assertIsNotNone(provider)
+
     def test_status_and_meta_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = JsonDMSMemoryStore(tmpdir)
@@ -114,6 +143,75 @@ class TestDMSMemoryModules(unittest.TestCase):
             )
             self.assertEqual(refreshed.meta.reuse_count, 2)
             self.assertEqual(refreshed.meta.survival_value, 1.5)
+
+    def test_record_consumes_selected_memory_feedback_and_task_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = JsonDMSMemoryStore(tmpdir)
+            record = _make_record("mem_feedback")
+            store.add_memory(record, [{"action": "tap"}])
+            provider = DMSMemoryProvider(
+                store=store,
+                config=DMSMemoryConfig(memory_root=Path(tmpdir)),
+            )
+
+            provider.record(
+                {
+                    "user_goal": "goal",
+                    "round_id": 1,
+                    "subtask": record.subtask_text,
+                    "status": "completed",
+                    "summary": "ok",
+                    "verifier_status": "success",
+                    "verifier_reason": "ok",
+                    "memory_eligible": True,
+                    "verifier_evidence_source": "actor_completed_frame",
+                    "success_check": True,
+                    "observation_digest": {},
+                    "selected_memory_id": "mem_feedback",
+                    "used_memory": True,
+                    "should_replay": True,
+                    "should_mutate": False,
+                    "retrieval_score": 0.9,
+                    "sim_goal": 0.8,
+                    "sim_precondition": 0.7,
+                    "survival_value": 1.2,
+                    "risk_score": 0.1,
+                    "memory_read_reason": "memory_hit",
+                    "invalid_action_count": 1,
+                    "no_state_change_count": 2,
+                    "parse_error_count": 3,
+                    "execution_error_count": 4,
+                }
+            )
+
+            updated = store.get_memory("mem_feedback")
+            self.assertEqual(updated.meta.reuse_count, 1)
+            self.assertEqual(updated.meta.success_count, 2)
+            self.assertEqual(updated.meta.invalid_action_count, 1)
+            self.assertEqual(updated.meta.no_state_change_count, 2)
+            self.assertEqual(updated.meta.parse_error_count, 3)
+            self.assertEqual(updated.meta.execution_error_count, 4)
+
+            provider.record(
+                {
+                    "event_type": "task_end",
+                    "user_goal": "goal",
+                    "round_id": 1,
+                    "subtask": "",
+                    "status": "completed",
+                    "summary": "done",
+                    "verifier_status": "",
+                    "verifier_reason": "",
+                    "memory_eligible": False,
+                    "verifier_evidence_source": "",
+                    "success_check": {},
+                    "observation_digest": {},
+                    "success": True,
+                    "global_success": True,
+                    "task_success": True,
+                }
+            )
+            self.assertEqual(provider.active_memory_ids_for_task, set())
 
 
 if __name__ == "__main__":

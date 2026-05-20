@@ -172,7 +172,7 @@ class AndroidTaskRunner:
         task.initialize_task(env)
         initial_stage_plan_record = self._generate_stage_plan_record(user_goal=user_goal)
         if initial_stage_plan_record.stage_plan_result.get("parse_error"):
-            return TaskRunResult(
+            result = TaskRunResult(
                 status="planner_error",
                 planner_rounds=[],
                 initial_stage_plan=initial_stage_plan_record.to_dict(),
@@ -184,6 +184,8 @@ class AndroidTaskRunner:
                     f"{initial_stage_plan_record.stage_plan_result.get('parse_error')}"
                 ),
             )
+            self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=0)
+            return result
         remembered_stage_plan = [
             PlannerStage(**stage)
             for stage in (initial_stage_plan_record.stage_plan_result.get("stage_plan") or [])
@@ -237,7 +239,7 @@ class AndroidTaskRunner:
                 stage_plan_revisions.append(revised_stage_plan_record)
                 last_stage_plan_revision_history_len = len(task_history)
                 if revised_stage_plan_record.stage_plan_result.get("parse_error"):
-                    return TaskRunResult(
+                    result = TaskRunResult(
                         status="planner_error",
                         planner_rounds=planner_rounds,
                         initial_stage_plan=initial_stage_plan_record.to_dict(),
@@ -250,6 +252,8 @@ class AndroidTaskRunner:
                             f"{revised_stage_plan_record.stage_plan_result.get('parse_error')}"
                         ),
                     )
+                    self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
+                    return result
                 remembered_stage_plan = [
                     PlannerStage(**stage)
                     for stage in (revised_stage_plan_record.stage_plan_result.get("stage_plan") or [])
@@ -298,7 +302,7 @@ class AndroidTaskRunner:
                 failure_pattern_counts["planner_near_json_repaired"] += 1
 
             if planner_result.parse_error:
-                return TaskRunResult(
+                result = TaskRunResult(
                     status="planner_error",
                     planner_rounds=planner_rounds,
                     initial_stage_plan=initial_stage_plan_record.to_dict(),
@@ -312,6 +316,8 @@ class AndroidTaskRunner:
                         f"{planner_result.parse_error}"
                     ),
                 )
+                self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
+                return result
 
             planner_result.stage_plan = list(remembered_stage_plan)
 
@@ -375,7 +381,7 @@ class AndroidTaskRunner:
             if planner_result.is_goal_complete:
                 success = self._task_success(task, env)
                 if success:
-                    return TaskRunResult(
+                    result = TaskRunResult(
                         status="completed",
                         planner_rounds=planner_rounds,
                         initial_stage_plan=initial_stage_plan_record.to_dict(),
@@ -385,6 +391,8 @@ class AndroidTaskRunner:
                         total_actor_steps=total_actor_steps,
                         completion_message=planner_result.completion_message or "Task check passed.",
                     )
+                    self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
+                    return result
                 self._append_planner_feedback_history(
                     task_history=task_history,
                     round_id=round_id,
@@ -450,7 +458,7 @@ class AndroidTaskRunner:
             for subtask in normalized_subtasks:
                 if total_actor_steps >= self.config.max_total_actor_steps:
                     round_record.replan_reason = "max_total_actor_steps_reached"
-                    return TaskRunResult(
+                    result = TaskRunResult(
                         status="actor_error",
                         planner_rounds=planner_rounds,
                         initial_stage_plan=initial_stage_plan_record.to_dict(),
@@ -463,13 +471,16 @@ class AndroidTaskRunner:
                             f"{self.config.max_total_actor_steps} was reached."
                         ),
                     )
+                    self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
+                    return result
 
-                actor_memory_context = self.memory_provider.build_actor_context(
+                memory_read_result = self._build_actor_memory_result(
                     user_goal=user_goal,
                     subtask=subtask.task,
                     observation=observation,
                     task_history=task_history,
                 )
+                actor_memory_context = str(memory_read_result.get("context") or "")
                 before_subtask_observation = observation
                 actor_observation = self._prepare_actor_observation(
                     subtask=subtask,
@@ -589,9 +600,10 @@ class AndroidTaskRunner:
                     verifier_evidence_source=verifier_evidence_source,
                     success_check=success_check,
                     observation=observation,
+                    memory_read_result=memory_read_result,
                 )
                 if subtask_completed and self.config.stop_on_goal_complete and self._task_success_if_available(task, env):
-                    return TaskRunResult(
+                    result = TaskRunResult(
                         status="completed",
                         planner_rounds=planner_rounds,
                         initial_stage_plan=initial_stage_plan_record.to_dict(),
@@ -605,6 +617,8 @@ class AndroidTaskRunner:
                             or "Task check passed after subtask execution."
                         ),
                     )
+                    self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
+                    return result
 
                 if subtask_completed:
                     recent_completed_subtasks[subtask.task] = recent_completed_subtasks.get(subtask.task, 0) + 1
@@ -687,7 +701,7 @@ class AndroidTaskRunner:
 
             continue
 
-        return TaskRunResult(
+        result = TaskRunResult(
             status="round_limit",
             planner_rounds=planner_rounds,
             initial_stage_plan=initial_stage_plan_record.to_dict(),
@@ -697,6 +711,8 @@ class AndroidTaskRunner:
             total_actor_steps=total_actor_steps,
             completion_message=self._build_round_limit_message(planner_rounds, failure_pattern_counts),
         )
+        self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=len(planner_rounds))
+        return result
 
     def _generate_stage_plan_record(self, *, user_goal: str, revision_reason: str | None = None) -> StagePlanRecord:
         planner_messages = self.planner.build_stage_plan_messages(user_goal=user_goal)
@@ -994,12 +1010,15 @@ class AndroidTaskRunner:
                 subtask=subtask.task,
                 observation=refreshed_observation,
                 action_history=task_history,
-                    memory_context=self.memory_provider.build_actor_context(
+                memory_context=str(
+                    self._build_actor_memory_result(
                         user_goal=user_goal,
                         subtask=subtask.task,
                         observation=refreshed_observation,
                         task_history=task_history,
-                    ),
+                    ).get("context")
+                    or ""
+                ),
             ),
             self.observation_adapter,
         )
@@ -1507,6 +1526,109 @@ class AndroidTaskRunner:
             }
         )
 
+    def _build_actor_memory_result(
+        self,
+        *,
+        user_goal: str,
+        subtask: str,
+        observation: dict[str, Any],
+        task_history: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        build_actor_memory = getattr(self.memory_provider, "build_actor_memory", None)
+        if callable(build_actor_memory):
+            result = build_actor_memory(
+                user_goal=user_goal,
+                subtask=subtask,
+                observation=observation,
+                task_history=task_history,
+            )
+            if hasattr(result, "to_event_fields"):
+                event_fields = result.to_event_fields()
+                event_fields["context"] = getattr(result, "context", "")
+                return event_fields
+            if isinstance(result, dict):
+                return result
+        return {
+            "context": self.memory_provider.build_actor_context(
+                user_goal=user_goal,
+                subtask=subtask,
+                observation=observation,
+                task_history=task_history,
+            )
+        }
+
+    @staticmethod
+    def _collect_actor_feedback_counts(actor_result: ActorRunResult) -> dict[str, int]:
+        invalid_action_count = 0
+        no_state_change_count = 0
+        parse_error_count = 0
+        execution_error_count = 0
+
+        for step in actor_result.steps:
+            if step.parse_error:
+                parse_error_count += 1
+                parse_error_text = str(step.parse_error).lower()
+                if any(
+                    marker in parse_error_text
+                    for marker in ("valid_ui_indices", "clickable", "editable", "index")
+                ):
+                    invalid_action_count += 1
+            if step.execution_error:
+                execution_error_count += 1
+            before = step.before_observation or {}
+            after = step.after_observation or {}
+            before_digest = (
+                before.get("current_activity"),
+                before.get("foreground_package"),
+                before.get("app_name"),
+                before.get("ui_description"),
+            )
+            after_digest = (
+                after.get("current_activity"),
+                after.get("foreground_package"),
+                after.get("app_name"),
+                after.get("ui_description"),
+            )
+            if after and before_digest == after_digest:
+                no_state_change_count += 1
+
+        return {
+            "invalid_action_count": invalid_action_count,
+            "no_state_change_count": no_state_change_count,
+            "parse_error_count": parse_error_count,
+            "execution_error_count": execution_error_count,
+        }
+
+    def _emit_task_end_memory_event(
+        self,
+        *,
+        user_goal: str,
+        result: TaskRunResult,
+        round_id: int,
+    ) -> None:
+        final_success = result.final_task_success
+        if final_success is None:
+            final_success = result.status == "completed"
+        self.memory_provider.record(
+            {
+                "event_type": "task_end",
+                "user_goal": user_goal,
+                "round_id": round_id,
+                "subtask": "",
+                "status": result.status,
+                "summary": result.completion_message,
+                "verifier_status": "",
+                "verifier_reason": "",
+                "memory_eligible": False,
+                "verifier_evidence_source": "",
+                "success_check": {},
+                "observation_digest": {},
+                "success": final_success,
+                "global_success": final_success,
+                "task_success": final_success,
+            }
+        )
+
     def _record_memory_event(
         self,
         *,
@@ -1518,8 +1640,11 @@ class AndroidTaskRunner:
         verifier_evidence_source: EvidenceSource,
         success_check: dict[str, Any],
         observation: dict[str, Any],
+        memory_read_result: dict[str, Any] | None = None,
     ) -> None:
         summary = verifier_result.reason or success_check.get("success_rule") or actor_result.completion_message or actor_result.status
+        feedback_counts = self._collect_actor_feedback_counts(actor_result)
+        memory_fields = dict(memory_read_result or {})
         event = MemoryEvent(
             user_goal=user_goal,
             round_id=round_id,
@@ -1540,6 +1665,20 @@ class AndroidTaskRunner:
                 "non_system_ui_count": observation.get("non_system_ui_count"),
                 "clickable_ui_count": observation.get("clickable_ui_count"),
             },
+            selected_memory_id=memory_fields.get("selected_memory_id"),
+            used_memory=memory_fields.get("used_memory"),
+            should_replay=memory_fields.get("should_replay"),
+            should_mutate=memory_fields.get("should_mutate"),
+            retrieval_score=memory_fields.get("retrieval_score"),
+            sim_goal=memory_fields.get("sim_goal"),
+            sim_precondition=memory_fields.get("sim_precondition"),
+            survival_value=memory_fields.get("survival_value"),
+            risk_score=memory_fields.get("risk_score"),
+            memory_read_reason=memory_fields.get("memory_read_reason"),
+            invalid_action_count=feedback_counts["invalid_action_count"],
+            no_state_change_count=feedback_counts["no_state_change_count"],
+            parse_error_count=feedback_counts["parse_error_count"],
+            execution_error_count=feedback_counts["execution_error_count"],
         )
         self.memory_provider.record(event.to_dict())
         if verifier_result.status != "success":

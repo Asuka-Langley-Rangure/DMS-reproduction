@@ -378,6 +378,35 @@ class FakeMemoryProvider(NoOpMemoryProvider):
         self.reset_calls += 1
 
 
+class FakeDMSMemoryProvider(FakeMemoryProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.actor_memory_calls = []
+
+    def build_actor_memory(self, user_goal: str, subtask: str, observation: dict, task_history: list[dict]) -> dict:
+        self.actor_memory_calls.append(
+            {
+                "user_goal": user_goal,
+                "subtask": subtask,
+                "observation": observation,
+                "task_history": list(task_history),
+            }
+        )
+        return {
+            "context": f"dms-actor-memory-context-{len(self.actor_memory_calls)}",
+            "selected_memory_id": f"mem_{len(self.actor_memory_calls)}",
+            "used_memory": True,
+            "should_replay": True,
+            "should_mutate": False,
+            "retrieval_score": 0.9,
+            "sim_goal": 0.8,
+            "sim_precondition": 0.7,
+            "survival_value": 1.2,
+            "risk_score": 0.1,
+            "memory_read_reason": "memory_hit",
+        }
+
+
 class FakeVerifier:
     def __init__(self, responses: list[dict]) -> None:
         self.responses = list(responses)
@@ -1305,12 +1334,13 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertEqual(len(memory.actor_context_calls), 1)
         self.assertEqual(planner.calls[0]["memory_context"], "memory-context-1")
         self.assertEqual(actor.calls[0]["memory_context"], "actor-memory-context-1")
-        self.assertEqual(len(memory.recorded_events), 1)
+        self.assertEqual(len(memory.recorded_events), 2)
         event = memory.recorded_events[0]
         self.assertEqual(event["user_goal"], "Create a contact")
         self.assertEqual(event["round_id"], 1)
         self.assertEqual(event["subtask"], "Precondition: None Goal: Open the Phone app.")
         self.assertIn("observation_digest", event)
+        self.assertEqual(memory.recorded_events[-1]["event_type"], "task_end")
         self.assertEqual(len(memory.recorded_trajectories), 1)
         trajectory_record = memory.recorded_trajectories[0]
         self.assertEqual(trajectory_record["subtask_text"], "Precondition: None Goal: Open the Phone app.")
@@ -1659,6 +1689,65 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertTrue(event["memory_eligible"])
         self.assertEqual(event["verifier_evidence_source"], "actor_completed_frame")
 
+    def test_dms_memory_provider_build_actor_memory_is_preferred_and_event_fields_are_recorded(self) -> None:
+        memory = FakeDMSMemoryProvider()
+        planner = FakePlanner(
+            [
+                PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("None", "Open Contacts", "Need app")]),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "done", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_observation("after"),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Verified", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(
+            planner,
+            actor,
+            adapter,
+            verifier=verifier,
+            memory_provider=memory,
+            config=TaskRunConfig(max_planner_rounds=2),
+        )
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(memory.actor_memory_calls), 1)
+        self.assertEqual(actor.calls[0]["memory_context"], "dms-actor-memory-context-1")
+        event = memory.recorded_events[0]
+        self.assertEqual(event["selected_memory_id"], "mem_1")
+        self.assertTrue(event["used_memory"])
+        self.assertTrue(event["should_replay"])
+        self.assertEqual(event["retrieval_score"], 0.9)
+        self.assertEqual(event["sim_goal"], 0.8)
+        self.assertEqual(event["sim_precondition"], 0.7)
+        self.assertEqual(event["survival_value"], 1.2)
+        self.assertEqual(event["risk_score"], 0.1)
+        self.assertEqual(event["memory_read_reason"], "memory_hit")
+
+    def test_task_end_event_is_emitted(self) -> None:
+        memory = FakeMemoryProvider()
+        planner = FakePlanner([PlannerResult(is_goal_complete=True, completion_message="done")])
+        actor = FakeActor([])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, memory_provider=memory)
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(memory.recorded_events[-1]["event_type"], "task_end")
+        self.assertTrue(memory.recorded_events[-1]["task_success"])
+
     def test_parse_error_trajectory_is_not_saved_to_static_memory(self) -> None:
         memory = FakeMemoryProvider()
         planner = FakePlanner(
@@ -1694,7 +1783,8 @@ class TaskRunnerTest(unittest.TestCase):
         result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Turn wifi off")
 
         self.assertEqual(result.status, "completed")
-        self.assertEqual(len(memory.recorded_events), 1)
+        self.assertEqual(len(memory.recorded_events), 2)
+        self.assertEqual(memory.recorded_events[-1]["event_type"], "task_end")
         self.assertEqual(len(memory.recorded_trajectories), 0)
 
     def test_misaligned_app_open_stage_subtask_replans_before_actor_runs(self) -> None:
