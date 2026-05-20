@@ -182,6 +182,9 @@ def build_actor_step(step_id: int, reason: str, action, status: str, done: bool)
         raw_response="raw",
         parse_error=None,
         execution_error=None,
+        step_verification_triggered=False,
+        step_verification=None,
+        step_verification_reason=None,
         before_observation=build_observation(f"before-{step_id}"),
         after_observation=build_observation(f"after-{step_id}"),
         summary=f"summary-{status}-{step_id}",
@@ -313,13 +316,14 @@ class FakeActor:
         self.responses = list(responses)
         self.calls = []
 
-    def run_subtask(self, env, request, observation_adapter) -> ActorRunResult:
+    def run_subtask(self, env, request, observation_adapter, step_verifier=None) -> ActorRunResult:
         self.calls.append(
             {
                 "subtask": request.subtask,
                 "observation": request.observation,
                 "action_history": list(request.action_history),
                 "memory_context": request.memory_context,
+                "step_verifier_present": step_verifier is not None,
             }
         )
         if not self.responses:
@@ -1649,6 +1653,39 @@ class TaskRunnerTest(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(verifier.calls[0].evidence_source, "final_after_observation")
+
+    def test_runner_passes_step_verifier_when_verifier_is_configured(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(is_goal_complete=False, subtasks=[PlannerSubtask("None", "Open Contacts", "Need app")]),
+                PlannerResult(is_goal_complete=True, completion_message="done"),
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="completed",
+                    steps=[build_actor_step(0, "done", StatusAction("complete", "done"), "completed", True)],
+                    final_observation=build_observation("after"),
+                    completion_message="done",
+                    last_action={"action_type": "status", "goal_status": "complete"},
+                )
+            ]
+        )
+        verifier = FakeVerifier([{"status": "success", "reason": "Verified", "memory_eligible": True}])
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(
+            planner,
+            actor,
+            adapter,
+            verifier=verifier,
+            config=TaskRunConfig(max_planner_rounds=2, stop_on_goal_complete=False),
+        )
+
+        result = runner.run_task(FakeEnv(), FakeTask([1.0]), "Create a contact")
+
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(actor.calls[0]["step_verifier_present"])
 
     def test_memory_event_records_verifier_fields(self) -> None:
         memory = FakeMemoryProvider()

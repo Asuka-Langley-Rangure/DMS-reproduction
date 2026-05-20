@@ -15,6 +15,7 @@ if PIL_AVAILABLE:
     from dms_reproduction.envs.observation_utils import (
         bbox_to_tuple,
         build_ui_description,
+        draw_labeled_screenshot,
         is_visible_candidate,
         standardize_ui_element,
     )
@@ -142,6 +143,27 @@ class ObservationUtilsTest(unittest.TestCase):
         self.assertEqual(standardized["bbox"], (1, 2, 11, 12))
         self.assertEqual(standardized["text"], "Create contact")
 
+    @patch("dms_reproduction.envs.observation_utils.Image.fromarray")
+    def test_draw_labeled_screenshot_can_hide_indices(self, utils_fromarray) -> None:
+        utils_fromarray.return_value = Image.new("RGB", (20, 40), color="black")
+        state = FakeState(
+            pixels=object(),
+            ui_elements=[
+                FakeUIElement(
+                    text="Create contact",
+                    class_name="android.widget.Button",
+                    bbox_pixels=FakeBBox(2, 3, 18, 20),
+                    is_clickable=True,
+                    is_enabled=True,
+                    is_visible=True,
+                    package_name="com.android.contacts",
+                ),
+            ],
+        )
+
+        image = draw_labeled_screenshot(state, [0], draw_indices=False)
+        self.assertIsInstance(image, Image.Image)
+
 
 @unittest.skipUnless(PIL_AVAILABLE, "Pillow is not installed in this environment.")
 class AndroidWorldObservationAdapterTest(unittest.TestCase):
@@ -189,8 +211,10 @@ class AndroidWorldObservationAdapterTest(unittest.TestCase):
 
         raw = base64.b64decode(observation["screenshot_b64"])
         labeled = base64.b64decode(observation["labeled_screenshot_b64"])
+        actor_labeled = base64.b64decode(observation["actor_labeled_screenshot_b64"])
         self.assertGreater(len(raw), 0)
         self.assertGreater(len(labeled), 0)
+        self.assertGreater(len(actor_labeled), 0)
 
     @patch("dms_reproduction.envs.observation_utils.Image.fromarray")
     @patch("dms_reproduction.envs.android_world_adapter.Image.fromarray")

@@ -111,8 +111,13 @@ def build_ui_description(
     return "\n".join(lines), valid_indices
 
 
-def draw_labeled_screenshot(state: Any, valid_indices: list[int]) -> Image.Image:
-    """Overlay element boxes and original UI indices onto the screenshot."""
+def draw_labeled_screenshot(
+    state: Any,
+    valid_indices: list[int],
+    *,
+    draw_indices: bool = True,
+) -> Image.Image:
+    """Overlay element boxes and optional original UI indices onto the screenshot."""
     image = Image.fromarray(state.pixels).convert("RGB")
     draw = ImageDraw.Draw(image)
 
@@ -127,8 +132,9 @@ def draw_labeled_screenshot(state: Any, valid_indices: list[int]) -> Image.Image
         y_min = max(0, y_min)
 
         draw.rectangle([x_min, y_min, x_max, y_max], outline="red", width=3)
-        draw.rectangle([x_min, y_min, x_min + 48, y_min + 28], fill="red")
-        draw.text((x_min + 3, y_min + 3), str(index), fill="white")
+        if draw_indices:
+            draw.rectangle([x_min, y_min, x_min + 48, y_min + 28], fill="red")
+            draw.text((x_min + 3, y_min + 3), str(index), fill="white")
 
     return image
 

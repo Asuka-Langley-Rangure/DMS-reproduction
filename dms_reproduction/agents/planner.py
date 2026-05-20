@@ -524,48 +524,30 @@ class AndroidTaskPlanner:
 
     def _build_generic_current_subtasks_system_prompt(self) -> str:
         return (
-            "You are an Android Task Planner. In this call, a frozen whole-task stage plan already exists.\n\n"
-            "Your job now is only to:\n"
-            "1. Decide which existing milestone is the current stage.\n"
-            "2. Output 1-2 executable functional subtasks that advance that stage.\n\n"
-            "Rules:\n"
-            "- Do not rewrite, replace, or expand the stage plan.\n"
-            "- Use only the provided stage plan when choosing current_stage_id.\n"
-            "- If adjacent frozen stages are over-fine field-level milestones on the same screen, you may execute them together in one subtask.\n"
-            "- In that case, keep current_stage_id as the earliest merged stage id and also return covered_stage_ids with every merged frozen stage id.\n"
-            "- covered_stage_ids must be a contiguous ascending list, must include current_stage_id, and must only contain adjacent frozen stages that this subtask really advances now.\n"
-            "- This is not rewriting the frozen plan; it is grouping same-screen field-level milestones for execution.\n"
-            "- Determine which frozen milestones are directly supported by the current observation before choosing current_stage_id.\n"
-            "- Choose the earliest stage that is not yet directly satisfied by the current observation.\n"
-            "- Do not jump to a later stage unless the current observation directly satisfies every earlier stage's success signal.\n"
-            "- Default to one main subtask; use two only if there are truly distinct parallel objectives.\n"
-            "- Do not repeat the same task wording multiple times in one response.\n"
-            "- The subtasks must be milestone-shaped, not gesture-shaped.\n"
-            "- Each subtask should usually take about 2-6 atomic actions, not one trivial click and not a full multi-stage workflow.\n"
+            "You are an Android Task Planner.\n\n"
+            "Produce a short-horizon SEQUENTIAL plan of 1-5 functional subtasks for an Android GUI task.\n\n"
+            "Planning rules:\n"
+            "- The tasks are executed in order: tasks[0], then tasks[1], then tasks[2].\n"
+            "- The first task must start from the current observable screen.\n"
+            "- Later tasks may start from the expected state after the previous task succeeds.\n"
+            "- Only the first Precondition must be true now. Later Preconditions must logically follow from earlier Goals.\n"
+            "- Prefer 2-4 subtasks for workflows that require navigation plus a state change, edit, creation, deletion, or verification.\n"
+            "- Return 1 subtask only when the current screen already contains the exact workspace/control needed, or when the next step is a repair/re-grounding step.\n"
+            "- Do not merge distinct phases into one subtask. Opening an app, reaching a screen, changing content/state, and saving/verifying are separate milestones.\n"
+            "- Each subtask must be milestone-shaped, not gesture-shaped.\n"
+            "- Do not describe low-level actions such as tap, click, press, type, swipe, scroll, or long press unless the user's goal itself is that operation.\n"
+            "- If you think of a low-level action, rewrite it as the UI state or functional result it should achieve.\n"
+            "- For same-screen form filling, group related fields into one subtask instead of one field per subtask.\n"
+            "- For settings/toggle goals such as turn on/off, enable/disable, or toggle: if the target control is not visible now, normally return subtasks for opening the relevant settings app/screen, reaching the target setting, and setting/verifying the requested state.\n"
             "- Use task history to avoid repeating failed or no-progress strategies.\n"
-            "- Do not describe low-level actions such as tap, click, press, select, type, input, swipe, scroll, open icon, or long press unless the user's goal itself is that operation.\n"
-            "- If you first think of a low-level interaction, rewrite it as the state change or functional result that interaction should achieve.\n"
-            "- If the current observation already satisfies one stage's success signal, move to the next unmet stage instead of repeating the same one.\n"
-            "- If the current screen conflicts with the frozen plan but there is no clear repair or state-loss evidence, interpret the screen using the existing milestones rather than inventing a new plan.\n"
-            "- If the current screen is launcher, home, app entry, list, folder, navigation, or any otherwise ambiguous state, prefer the earliest directly supported stage rather than assuming later progress.\n"
-            "- current_stage_id must match the returned subtasks semantically.\n"
-            "- complete_goal is only a completion candidate, not final success.\n"
-            "- Return complete_goal only if the current observation directly shows that the overall goal is already achieved.\n"
-            "- Return complete_goal only if the current observation also directly satisfies the final milestone in the frozen stage plan.\n"
-            "- Never return complete_goal based only on user_goal, common sense, inferred path completion, or the mere existence of the frozen stage plan.\n"
-            "- If task history contains planner_complete_but_task_check_failed, treat that as a planner failure and return a repair, verification, or progress-making subtask unless the current screen now provides new direct evidence that the evaluator can pass.\n"
-            "- A launcher, home, app entry, folder navigation, list, or detail screen without direct final-result evidence must not return complete_goal.\n\n"
-            "Output:\n"
-            '{"tool":"complete_goal","message":"..."}\n\n'
-            "or\n\n"
-            '{"tool":"set_tasks","current_stage_id":1,"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
-            "or, when one subtask intentionally advances multiple adjacent frozen stages:\n\n"
-            '{"tool":"set_tasks","current_stage_id":1,"covered_stage_ids":[1,2],"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
-            "Constraints:\n"
+            "- Return complete_goal only if the current observation directly proves the overall goal is already achieved.\n\n"
+            "Output constraints:\n"
             "- Return valid JSON only.\n"
-            "- If tool is set_tasks, return at least one task.\n"
-            "- Return covered_stage_ids only when one subtask intentionally advances multiple adjacent frozen stages.\n"
-            "- Do not include stage_plan unless explicitly repairing it, which is not part of this call."
+            "- Use either complete_goal or set_tasks.\n"
+            "- If using set_tasks, return 1-5 tasks.\n"
+            "- Every task must be one string containing both 'Precondition:' and 'Goal:'.\n"
+            "- Do not return separate precondition/goal fields.\n"
+            "- Do not return stage_plan, current_stage_id, or covered_stage_ids."
         )
 
     def _build_generic_system_prompt(self) -> str:
@@ -848,94 +830,12 @@ class AndroidTaskPlanner:
         task_history: List[Dict[str, Any]],
         memory_context: str,
     ) -> str:
-        current_activity = observation.get("current_activity") or "Unknown"
-        app_name = observation.get("app_name") or "Unknown"
-        screen_size = observation.get("screen_size") or {}
-        ui_description = observation.get("ui_description") or "No visible UI elements available."
-        history_text = self._format_task_history(task_history)
-        stage_plan_text = self._format_frozen_stage_plan(stage_plan)
-        memory_text = self._truncate(memory_context.strip(), self.config.max_memory_context_chars)
-
-        return (
-            "You are an Android Task Planner. Your job is to create short, functional plans "
-            f"(1-{self.config.max_subtasks} steps) to achieve a user's goal on an Android device.\n\n"
-            "**Inputs You Receive:**\n"
-            "1. **User's Overall Goal.**\n"
-            "2. **Current Device State:**\n"
-            "   * A **screenshot** of the current screen with red bounding boxes and numeric labels.\n"
-            "   * The numeric labels correspond to the indexed UI elements described below.\n"
-            "   * The current visible Android activity.\n"
-            "   * A **Visible UI elements summary** describing the current screen.\n"
-            "3. **Complete Task History:**\n"
-            "   * A record of ALL tasks that have been completed or failed throughout the session.\n"
-            "   * For completed tasks, the results and any discovered information.\n"
-            "   * For failed tasks, the detailed reasons for failure.\n"
-            "   * This history persists across all planning cycles and is never lost.\n"
-            "4. **Retrieved memory context** from previous trials when available.\n\n"
-            f"User's Overall Goal:\n{user_goal}\n\n"
-            "Current Device State:\n"
-            f"- Current app: {app_name}\n"
-            f"- Current activity: {current_activity}\n"
-            f"- Screen size: {json.dumps(screen_size, ensure_ascii=False)}\n"
-            "Visible UI elements summary:\n"
-            f"{ui_description}\n\n"
-            "Complete Task History:\n"
-            f"{history_text}\n\n"
-            "Retrieved memory context:\n"
-            f"{memory_text if memory_text else 'None'}\n\n"
-            "Frozen stage plan:\n"
-            f"{stage_plan_text}\n\n"
-            "**Your Task:**\n"
-            f"Given the goal, current state, and task history, devise the **next 1-{self.config.max_subtasks} functional steps**.\n"
-            "Focus on what to achieve, not how. Planning fewer steps at a time improves accuracy, as the state can change.\n"
-            "After your planned steps are executed, you will be invoked again with the new device state.\n"
-            "At that time you must assess whether the overall user goal is complete, call `complete_goal` if it is complete, "
-            "or return the next functional steps if it is not complete.\n\n"
-            "**Step Format:**\n"
-            "Return exactly one current subtask for the selected frozen stage.\n"
-            "That subtask must be a functional goal.\n"
-            "A **precondition** describing the expected starting screen/state for that subtask is required.\n"
-            "Each task string must use \"Precondition: ... Goal: ...\".\n"
-            "The task field must be one single string that contains both Precondition and Goal.\n"
-            "Do not return a separate Goal field or separate Precondition field inside a task object.\n"
-            "The Precondition must describe the current observable state BEFORE the Actor starts this subtask.\n"
-            "It must be true in the current observation.\n"
-            "Do not write a precondition that will only become true after completing an earlier stage.\n"
-            "If no specific precondition is already true for the current screen, use "
-            "\"Precondition: None. Goal: ...\".\n\n"
-            "**Your Output:**\n"
-            "If the overall user goal is complete, return only:\n"
-            '{"tool":"complete_goal","message":"..."}\n\n'
-            "Otherwise return only:\n"
-            '{"tool":"set_tasks","current_stage_id":1,"tasks":[{"task":"Precondition: ... Goal: ...","reason":"..."}]}\n\n'
-            "**Memory Persistence:**\n"
-            "* You maintain a COMPLETE memory of ALL tasks across the entire session.\n"
-            "* Every task that was completed or failed is preserved in your context.\n"
-            "* Previously completed steps are never lost when returning new steps.\n"
-            "* Use this accumulated knowledge to build progressively on successful steps.\n"
-            "* When you see discovered information, use it explicitly in future tasks.\n\n"
-            "**System Compatibility Constraints:**\n"
-            "- The frozen stage plan already describes the whole task. Do not rewrite it in this call.\n"
-            "- Use the frozen stage plan when choosing current_stage_id.\n"
-            "- First determine which frozen milestones are directly supported by the current screen.\n"
-            "- Then choose the earliest existing stage that is not yet directly satisfied.\n"
-            "- Then return exactly one current subtask that advances that stage.\n"
-            "- Use task history to avoid repeating failed or no-progress strategies.\n"
-            "- Do not return duplicate or near-duplicate tasks.\n"
-            "- The subtask must be milestone-shaped, not gesture-shaped.\n"
-            "- Do not output low-level actions or atomic UI operations.\n"
-            "- If current_stage_id refers to an app-opening stage, the returned subtask must still be about opening or launching that app. Do not write a precondition that assumes the app is already open while keeping the same current_stage_id.\n"
-            "- Reason must be consistent with the Precondition. Do not say an app needs to be opened first while also writing a precondition that the app is already open.\n"
-            "- If the current observation does not satisfy a precondition, do not write that precondition. Put the missing requirement into the Goal of the current or earlier stage instead.\n"
-            "- Each goal should be a short, functional objective.\n"
-            "- Each goal should produce a checkable state change after completion.\n"
-            "- If the current screen already exposes a useful entry point, describe the next state to reach rather than the literal tap.\n"
-            "- If the current screen is already on a form or detail page, do not fall back to navigation-stage subtasks.\n"
-            "- If you think of a tap, click, press, select, long press, scroll, or type action, rewrite it as the milestone state that action is meant to achieve before you output the task.\n"
-            "- Ensure current_stage_id and the returned tasks describe the same milestone.\n"
-            "- Return complete_goal only if the current screen directly shows the final requested result and directly satisfies the final frozen milestone.\n"
-            "- If task history includes planner_complete_but_task_check_failed, treat it as a planner failure and return a repair, verification, or progress-making subtask unless the current screen now provides new direct evidence that the evaluator can pass.\n"
-            "- Return valid JSON only.\n"
+        return self._build_generic_user_prompt(
+            user_goal=user_goal,
+            stage_plan=stage_plan,
+            observation=observation,
+            task_history=task_history,
+            memory_context=memory_context,
         )
 
     def _build_generic_user_prompt(
@@ -948,67 +848,64 @@ class AndroidTaskPlanner:
     ) -> str:
         current_activity = observation.get("current_activity") or "Unknown"
         app_name = observation.get("app_name") or "Unknown"
-        screen_size = observation.get("screen_size") or {}
-        ui_elements = observation.get("ui_elements") or []
         ui_description = observation.get("ui_description") or "No visible UI elements available."
-        ui_json = self._format_ui_json(ui_elements)
+        observation_warning = observation.get("observation_warning") or "None"
+        observation_consistency = observation.get("observation_consistency") or "Unknown"
         history_text = self._format_task_history(task_history)
-        stage_plan_text = self._format_frozen_stage_plan(stage_plan)
-        repeat_warning_text = self._format_stage_repeat_warnings(task_history)
-        contextual_hint_text = self._build_generic_contextual_planning_hints(observation)
         memory_text = self._truncate(memory_context.strip(), self.config.max_memory_context_chars)
+
+        goal_lower = user_goal.lower()
+        task_type_hint = ""
+        if any(x in goal_lower for x in ["turn on", "turn off", "enable", "disable", "toggle", "wifi", "wi-fi", "bluetooth"]):
+            task_type_hint = (
+                "Task-type hint:\n"
+                "- This looks like a settings/toggle task.\n"
+                "- If the requested control is not visible on the current screen, do NOT return a single broad subtask.\n"
+                "- Prefer this structure: open the relevant Settings area; reach the target setting screen; set and verify the requested on/off state.\n\n"
+            )
 
         return (
             f"User overall goal:\n{user_goal}\n\n"
             "Current device state:\n"
-            # f"- Current app: {app_name}\n"
-            # f"- Current activity: {current_activity}\n"
-            # f"- Screen size: {json.dumps(screen_size, ensure_ascii=False)}\n"
-            "- You are given a screenshot with red bounding boxes and numeric labels.\n"
-            "- The numeric labels correspond to UI element indexes below.\n"
-            f"Visible UI elements summary:\n{ui_description}\n\n"
+            f"- Current app: {app_name}\n"
+            f"- Current activity: {current_activity}\n"
+            f"- Observation consistency: {observation_consistency}\n"
+            f"- Observation warning: {observation_warning}\n"
+            "- A screenshot with numbered UI boxes is provided for current-screen grounding.\n"
+            f"- Visible UI elements summary:\n{ui_description}\n\n"
             f"Complete task history:\n{history_text}\n\n"
-            f"Frozen stage plan:\n{stage_plan_text}\n\n"
-            f"Stage repetition warnings:\n{repeat_warning_text}\n\n"
-            f"Contextual planning hints:\n{contextual_hint_text}\n\n"
             "Retrieved memory context:\n"
             f"{memory_text if memory_text else 'None'}\n\n"
-            "Planner instruction:\n"
-            "- The frozen stage plan already describes the whole task. Do not rewrite it in this call.\n"
-            "- Do not create separate subtasks for same-form fields such as name and phone unless task history shows a specific field failed.\n"
-            "- First determine which frozen milestones are directly supported by the current screen.\n"
-            "- Then choose the earliest existing stage that is not yet directly satisfied.\n"
-            "- Then return exactly one current subtask that advances that stage.\n"
-            "- Consider complete_goal only as an exception after the previous three checks.\n"
-            "- If you return set_tasks, you must return current_stage_id and at least one task.\n"
-            "- Every step must use 'Precondition: ... Goal: ...'.\n"
-            "- The task field must be one single string that contains both Precondition and Goal.\n"
-            "- Do not return a separate Goal field or separate Precondition field inside a task object.\n"
-            "- The Precondition must describe the current observable state BEFORE the Actor starts this subtask.\n"
-            "- It must be true in the current observation.\n"
-            "- Do not write a precondition that will only become true after completing an earlier stage.\n"
-            "- Do not output low-level actions or atomic UI operations.\n"
-            "- Each goal should be a short, functional objective.\n"
-            "- Each goal should produce a checkable state change after completion.\n"
-            "- Use the current screen as the source of truth.\n"
-            "- Use task history to avoid repeating failed or no-progress strategies.\n"
-            "- Return one current subtask for the selected stage, not multiple parallel subtasks.\n"
-            "- Do not return duplicate or near-duplicate tasks in the same response.\n"
-            "- Do not make a single field, single button, single tab, or single directory click the default subtask granularity.\n"
-            "- If current_stage_id refers to an app-opening stage, the returned subtask must still be about opening or launching that app. Do not write a precondition that says the app is already open while keeping the same current_stage_id.\n"
-            "- Reason must be consistent with the Precondition. Do not say an app needs to be opened first while also writing a precondition that the app is already open.\n"
-            "- If the current observation does not satisfy a precondition, do not write that precondition. Put the missing requirement into the Goal of the current or earlier stage instead.\n"
-            "- If the current screen already exposes a useful entry point, describe the next state to reach rather than the literal tap.\n"
-            "- If the current screen is already on a form or detail page, do not fall back to navigation-stage subtasks.\n"
-            "- If you think of a tap, click, press, select, long press, scroll, or type action, rewrite it as the milestone state that action is meant to achieve before you output the task.\n"
-            "- Ensure current_stage_id and the returned tasks describe the same milestone.\n"
-            "- If the current screen already satisfies one stage's success signal, choose the next unmet stage.\n"
-            "- If the current screen seems surprising but there is no explicit repair or state-loss evidence in history, interpret it using the frozen milestones instead of inventing a new plan.\n"
-            "- If the screen is unstable, degraded, or ambiguous, prefer a safer recovery or navigation objective instead of assuming success.\n"
-            "- Do not skip to a later stage unless the current screen directly supports all earlier milestones as already satisfied.\n"
-            "- Return complete_goal only if the current screen directly shows the final requested result and directly satisfies the final frozen milestone.\n"
-            "- Do not return complete_goal from launcher, home, app entry, folder navigation, list, or detail views unless those screens themselves directly prove the final requested result.\n"
-            "- If task history includes planner_complete_but_task_check_failed, treat it as a planner failure and return a repair, verification, or progress-making subtask unless the current screen now provides new direct evidence that the evaluator can pass.\n"
+            f"{task_type_hint}"
+            "Planning instruction:\n"
+            "- Return a sequential plan of 1-5 functional subtasks.\n"
+            "- Use the current screen to ground the first subtask.\n"
+            "- Use the overall goal to infer the next few expected milestones.\n"
+            "- Later subtasks may depend on earlier subtasks succeeding.\n"
+            "- Do not require later Preconditions to be true right now.\n"
+            "- Split the plan whenever the workflow changes phase: opening app, reaching screen, editing/changing state, saving/confirming/verifying.\n"
+            "- Do not combine navigation and the final state change into one subtask when the target screen/control is not currently visible.\n"
+            "- Return one subtask only if the target screen/control/workspace is already visible, or if the next action is a repair/re-grounding step.\n"
+            "- If the current screen is already on the needed form/detail/settings page, skip earlier navigation and plan from the current page.\n"
+            "- If the screen is unstable or degraded, return a safe recovery or re-grounding subtask.\n"
+            "- If task history contains planner_complete_but_task_check_failed, do not return complete_goal again unless the current screen gives new direct evidence.\n\n"
+            "Output format:\n"
+            "If the overall goal is already directly achieved on the current screen, return:\n"
+            '{"tool":"complete_goal","message":"..."}\n\n'
+            "Otherwise return set_tasks. For multi-stage work, return multiple tasks, for example:\n"
+            '{"tool":"set_tasks","tasks":['
+            '{"task":"Precondition: The current screen is not the required app or settings page. Goal: Open the relevant app or settings area for the user goal.","reason":"The workflow cannot be completed from the current screen."},'
+            '{"task":"Precondition: The relevant app or settings area is open. Goal: Reach the specific screen containing the requested target, item, form, or control.","reason":"The target workspace must be visible before changing it."},'
+            '{"task":"Precondition: The specific target screen or control is visible. Goal: Complete the requested change, entry, creation, deletion, or configuration.","reason":"This performs the main requested state change."},'
+            '{"task":"Precondition: The requested change has been made or is visible. Goal: Save, confirm, or verify the final result if needed.","reason":"The result should be persistent and checkable."}'
+            ']}\n\n'
+            "For a settings/toggle task from launcher, a good shape is:\n"
+            '{"tool":"set_tasks","tasks":['
+            '{"task":"Precondition: The current screen is the launcher or another non-settings screen. Goal: Open the Settings app or the relevant system settings area.","reason":"Wi-Fi and similar device settings are changed from Settings, not from the launcher."},'
+            '{"task":"Precondition: The Settings app or system settings area is open. Goal: Reach the Network, Internet, or Wi-Fi settings screen that contains the Wi-Fi control.","reason":"The Wi-Fi control must be visible before it can be changed."},'
+            '{"task":"Precondition: The Wi-Fi settings screen or Wi-Fi control is visible. Goal: Turn Wi-Fi off and verify that it is off.","reason":"The final requested state is Wi-Fi off."}'
+            ']}\n\n'
+            "Return valid JSON only."
         )
 
     def _build_legacy_user_prompt(

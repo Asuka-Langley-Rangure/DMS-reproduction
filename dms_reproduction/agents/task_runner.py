@@ -170,26 +170,6 @@ class AndroidTaskRunner:
     def run_task(self, env: Any, task: Any, user_goal: str) -> TaskRunResult:
         self.memory_provider.reset()
         task.initialize_task(env)
-        initial_stage_plan_record = self._generate_stage_plan_record(user_goal=user_goal)
-        if initial_stage_plan_record.stage_plan_result.get("parse_error"):
-            result = TaskRunResult(
-                status="planner_error",
-                planner_rounds=[],
-                initial_stage_plan=initial_stage_plan_record.to_dict(),
-                final_observation=None,
-                final_task_success=None,
-                total_actor_steps=0,
-                completion_message=(
-                    "Planner stage-plan parse error: "
-                    f"{initial_stage_plan_record.stage_plan_result.get('parse_error')}"
-                ),
-            )
-            self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=0)
-            return result
-        remembered_stage_plan = [
-            PlannerStage(**stage)
-            for stage in (initial_stage_plan_record.stage_plan_result.get("stage_plan") or [])
-        ]
         observation = self.observation_adapter.capture_observation(
             env,
             goal=user_goal,
@@ -199,81 +179,23 @@ class AndroidTaskRunner:
         task_history: list[dict[str, Any]] = []
         planner_rounds: list[PlannerRoundRecord] = []
         total_actor_steps = 0
-        remembered_current_stage_id: int | None = None
-        stage_plan_revisions: list[StagePlanRecord] = []
-        last_stage_plan_revision_history_len = 0
-        recent_completed_subtasks: dict[str, int] = {}
-        normalized_subtask_progress: dict[str, int] = {}
         failure_pattern_counts = {
             "invalid_index": 0,
             "unstable_observation": 0,
-            "planner_subtask_invalid": 0,
-            "actor_overshoot_after_goal": 0,
             "planner_near_json_repaired": 0,
             "actor_action_alias_normalized": 0,
             "recoverable_schema_error": 0,
-            "text_entry_success_detected": 0,
-            "group_form_subtask_used": 0,
-            "form_fill_partial_progress": 0,
-            "field_level_fallback_used": 0,
+            "planner_subtask_invalid": 0,
         }
-        if remembered_stage_plan:
-            self._append_stage_plan_history(
-                task_history=task_history,
-                round_id=0,
-                stage_plan=remembered_stage_plan,
-                current_stage_id=None,
-                covered_stage_ids=[],
-            )
 
         for round_id in range(1, self.config.max_planner_rounds + 1):
-            revision_reason = self._consume_stage_plan_revision_reason(
-                task_history=task_history,
-                since_history_len=last_stage_plan_revision_history_len,
-            )
-            if revision_reason is not None:
-                revised_stage_plan_record = self._generate_stage_plan_record(
-                    user_goal=user_goal,
-                    revision_reason=revision_reason,
-                )
-                stage_plan_revisions.append(revised_stage_plan_record)
-                last_stage_plan_revision_history_len = len(task_history)
-                if revised_stage_plan_record.stage_plan_result.get("parse_error"):
-                    result = TaskRunResult(
-                        status="planner_error",
-                        planner_rounds=planner_rounds,
-                        initial_stage_plan=initial_stage_plan_record.to_dict(),
-                        stage_plan_revisions=[record.to_dict() for record in stage_plan_revisions],
-                        final_observation=observation,
-                        final_task_success=None,
-                        total_actor_steps=total_actor_steps,
-                        completion_message=(
-                            "Planner stage-plan parse error during revision: "
-                            f"{revised_stage_plan_record.stage_plan_result.get('parse_error')}"
-                        ),
-                    )
-                    self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
-                    return result
-                remembered_stage_plan = [
-                    PlannerStage(**stage)
-                    for stage in (revised_stage_plan_record.stage_plan_result.get("stage_plan") or [])
-                ]
-                remembered_current_stage_id = None
-                self._append_stage_plan_history(
-                    task_history=task_history,
-                    round_id=round_id,
-                    stage_plan=remembered_stage_plan,
-                    current_stage_id=None,
-                    covered_stage_ids=[],
-                )
             planner_memory_context = self.memory_provider.build_context(
                 user_goal=user_goal,
                 observation=observation,
                 task_history=task_history,
             )
-            planner_messages = self.planner.build_current_subtasks_messages(
+            planner_messages = self.planner.build_messages(
                 user_goal=user_goal,
-                stage_plan=remembered_stage_plan,
                 observation=observation,
                 task_history=task_history,
                 memory_context=planner_memory_context,
@@ -305,8 +227,6 @@ class AndroidTaskRunner:
                 result = TaskRunResult(
                     status="planner_error",
                     planner_rounds=planner_rounds,
-                    initial_stage_plan=initial_stage_plan_record.to_dict(),
-                    stage_plan_revisions=[record.to_dict() for record in stage_plan_revisions],
                     final_observation=observation,
                     final_task_success=None,
                     total_actor_steps=total_actor_steps,
@@ -319,63 +239,6 @@ class AndroidTaskRunner:
                 self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
                 return result
 
-            planner_result.stage_plan = list(remembered_stage_plan)
-
-            planner_current_stage_id = planner_result.current_stage_id
-            if planner_current_stage_id is not None and remembered_stage_plan:
-                valid_stage_ids = {stage.stage_id for stage in remembered_stage_plan}
-                if planner_current_stage_id not in valid_stage_ids:
-                    planner_result.stage_plan = list(remembered_stage_plan)
-                    round_record.planner_result = planner_result.to_dict()
-                    round_record.replan_reason = "planner_current_stage_invalid"
-                    self._append_planner_feedback_history(
-                        task_history=task_history,
-                        round_id=round_id,
-                        status="planner_current_stage_invalid",
-                        reason=(
-                            f"Planner returned current_stage_id={planner_current_stage_id}, "
-                            "but that stage does not exist in the frozen stage plan."
-                        ),
-                        summary=(
-                            f"Invalid current_stage_id {planner_current_stage_id}. "
-                            f"Valid stage ids: {sorted(valid_stage_ids)}. "
-                            "Return a current_stage_id from the frozen stage plan instead of inventing a new stage."
-                        ),
-                        observation=observation,
-                    )
-                    continue
-            planner_covered_stage_ids = list(planner_result.covered_stage_ids)
-            covered_stage_ids_error = self._validate_covered_stage_ids_against_frozen_plan(
-                covered_stage_ids=planner_covered_stage_ids,
-                current_stage_id=planner_current_stage_id,
-                stage_plan=remembered_stage_plan,
-            )
-            if covered_stage_ids_error is not None:
-                round_record.replan_reason = "planner_covered_stage_ids_invalid"
-                self._append_planner_feedback_history(
-                    task_history=task_history,
-                    round_id=round_id,
-                    status="planner_covered_stage_ids_invalid",
-                    reason=covered_stage_ids_error,
-                    summary=covered_stage_ids_error,
-                    observation=observation,
-                )
-                continue
-            if planner_current_stage_id is None:
-                planner_current_stage_id = remembered_current_stage_id
-            if planner_current_stage_id is None and remembered_stage_plan:
-                planner_current_stage_id = remembered_stage_plan[0].stage_id
-            planner_result.current_stage_id = planner_current_stage_id
-            if planner_result.current_stage_id is not None and not planner_result.covered_stage_ids:
-                planner_result.covered_stage_ids = [planner_result.current_stage_id]
-            if planner_result.stage_plan:
-                self._append_stage_plan_history(
-                    task_history=task_history,
-                    round_id=round_id,
-                    stage_plan=planner_result.stage_plan,
-                    current_stage_id=planner_result.current_stage_id,
-                    covered_stage_ids=planner_result.covered_stage_ids,
-                )
             round_record.planner_result = planner_result.to_dict()
 
             if planner_result.is_goal_complete:
@@ -384,8 +247,6 @@ class AndroidTaskRunner:
                     result = TaskRunResult(
                         status="completed",
                         planner_rounds=planner_rounds,
-                        initial_stage_plan=initial_stage_plan_record.to_dict(),
-                        stage_plan_revisions=[record.to_dict() for record in stage_plan_revisions],
                         final_observation=observation,
                         final_task_success=True,
                         total_actor_steps=total_actor_steps,
@@ -422,8 +283,6 @@ class AndroidTaskRunner:
                 subtasks=subtasks,
                 user_goal=user_goal,
                 observation=observation,
-                stage_plan=planner_result.stage_plan,
-                current_stage_id=planner_result.current_stage_id,
             )
             round_record.normalized_subtasks = [subtask.to_dict() for subtask in normalized_subtasks]
             if invalid_reason:
@@ -438,31 +297,14 @@ class AndroidTaskRunner:
                     observation=observation,
                 )
                 continue
-            grounding_check, grounding_reason = self._validate_subtasks_against_observation(
-                normalized_subtasks,
-                observation,
-            )
-            round_record.planner_grounding_check = grounding_check
-            if grounding_reason:
-                round_record.replan_reason = grounding_reason
-                self._append_planner_feedback_history(
-                    task_history=task_history,
-                    round_id=round_id,
-                    status=grounding_reason,
-                    reason="Planner referenced a visible UI target that is absent from the current observation.",
-                    summary=self._build_grounding_feedback_summary(grounding_check, observation),
-                    observation=observation,
-                )
-                continue
 
+            round_all_subtasks_succeeded = True
             for subtask in normalized_subtasks:
                 if total_actor_steps >= self.config.max_total_actor_steps:
                     round_record.replan_reason = "max_total_actor_steps_reached"
                     result = TaskRunResult(
                         status="actor_error",
                         planner_rounds=planner_rounds,
-                        initial_stage_plan=initial_stage_plan_record.to_dict(),
-                        stage_plan_revisions=[record.to_dict() for record in stage_plan_revisions],
                         final_observation=observation,
                         final_task_success=None,
                         total_actor_steps=total_actor_steps,
@@ -482,10 +324,7 @@ class AndroidTaskRunner:
                 )
                 actor_memory_context = str(memory_read_result.get("context") or "")
                 before_subtask_observation = observation
-                actor_observation = self._prepare_actor_observation(
-                    subtask=subtask,
-                    observation=observation,
-                )
+                actor_observation = self._prepare_actor_observation(subtask=subtask, observation=observation)
                 actor_result = self.actor.run_subtask(
                     env,
                     ActorRequest(
@@ -525,17 +364,16 @@ class AndroidTaskRunner:
                     actor_result=actor_result,
                     current_observation=observation,
                 )
-                actor_result, success_check = self._apply_subtask_success_override(subtask, actor_result, observation)
-                actor_result, observation, success_check = self._postprocess_contact_form_subtask(
-                    env=env,
-                    task=task,
-                    user_goal=user_goal,
-                    round_id=round_id,
-                    subtask=subtask,
-                    actor_result=actor_result,
-                    current_observation=observation,
-                    success_check=success_check,
-                )
+                success_check = {
+                    "progress_made": actor_result.status in {"completed", "stopped"},
+                    "state_changed": bool(actor_result.final_observation),
+                    "save_attempted": any(
+                        step.action and step.action.action_type in {"click", "long_press"}
+                        for step in actor_result.steps
+                    ),
+                    "verification_target_visible": False,
+                    "terminal_failure_reason": None,
+                }
                 verifier_result, verifier_evidence_source = self._run_subtask_verification(
                     subtask=subtask,
                     actor_result=actor_result,
@@ -552,15 +390,8 @@ class AndroidTaskRunner:
                     failure_pattern_counts["recoverable_schema_error"] += 1
                 total_actor_steps += len(actor_result.steps)
                 observation = actor_result.final_observation or observation
-                terminal_replan_reason = str(success_check.get("terminal_failure_reason") or "").strip() or None
-                hard_failure_reasons = {
-                    "field_misgrounded",
-                    "saved_but_task_check_failed",
-                    "saved_with_wrong_identity",
-                }
-                subtask_completed = False
-                if terminal_replan_reason not in hard_failure_reasons and verifier_result.status == "success":
-                    subtask_completed = True
+                subtask_completed = verifier_result.status == "success"
+                if subtask_completed:
                     actor_result.status = "completed"
                     actor_result.final_observation = observation
                     if not actor_result.completion_message:
@@ -573,20 +404,6 @@ class AndroidTaskRunner:
                         subtask_success_check=success_check,
                         subtask_verification=verifier_result.to_dict(),
                     )
-                )
-                if success_check.get("runner_overrode_to_completed"):
-                    failure_pattern_counts["actor_overshoot_after_goal"] += 1
-                if str(success_check.get("success_rule") or "").startswith("text_entry_"):
-                    failure_pattern_counts["text_entry_success_detected"] += 1
-                if _parse_contact_form_fill_goal(subtask.goal) is not None:
-                    failure_pattern_counts["group_form_subtask_used"] += 1
-                if success_check.get("form_fill_progress"):
-                    if success_check.get("progress_made") and not success_check.get("success_rule"):
-                        failure_pattern_counts["form_fill_partial_progress"] += 1
-                if AndroidTaskRunner._parse_text_entry_goal(subtask.goal.lower())[0]:
-                    failure_pattern_counts["field_level_fallback_used"] += 1
-                round_record.observation_transition_report.extend(
-                    self._build_observation_transition_entries(subtask, actor_result)
                 )
                 self._append_actor_history(task_history, round_id, subtask, actor_result)
                 self._append_observation_warning_history(task_history, round_id, subtask, observation)
@@ -620,92 +437,47 @@ class AndroidTaskRunner:
                     self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
                     return result
 
-                if subtask_completed:
-                    recent_completed_subtasks[subtask.task] = recent_completed_subtasks.get(subtask.task, 0) + 1
-                    normalized_subtask_progress[subtask.task] = normalized_subtask_progress.get(subtask.task, 0) + 1
-                    remembered_current_stage_id = self._next_stage_id_after_covered(
-                        planner_result.covered_stage_ids,
-                        remembered_stage_plan,
-                    )
-                    if planner_result.stage_plan:
-                        self._append_stage_plan_history(
-                            task_history=task_history,
-                            round_id=round_id,
-                            stage_plan=planner_result.stage_plan,
-                            current_stage_id=remembered_current_stage_id,
-                            covered_stage_ids=planner_result.covered_stage_ids,
-                        )
-                else:
-                    recent_completed_subtasks[subtask.task] = 0
-                    normalized_subtask_progress[subtask.task] = normalized_subtask_progress.get(subtask.task, 0) + 1
-                    remembered_current_stage_id = planner_result.current_stage_id
-
-                degraded_replan_reason = self._degraded_observation_reason(observation)
-                suspicious_completion = self._suspicious_completion_reason(
-                    subtask_task=subtask.task,
-                    actor_result=actor_result,
-                    completed_count=recent_completed_subtasks.get(subtask.task, 0),
-                    observation=observation,
-                )
-                repeated_no_progress_reason = self._same_subtask_no_progress_reason(
-                    subtask.task,
-                    normalized_subtask_progress.get(subtask.task, 0),
-                    actor_result,
-                    observation,
-                )
                 failure_reason = self._classify_actor_failure(actor_result)
 
                 if unstable_persisted:
                     failure_pattern_counts["unstable_observation"] += 1
                     round_record.replan_reason = "observation_unstable_persisted"
-                    break
-                if terminal_replan_reason in hard_failure_reasons:
-                    round_record.replan_reason = terminal_replan_reason
+                    round_all_subtasks_succeeded = False
                     break
                 if verifier_result.status != "success":
                     if failure_reason == "invalid_index_error":
                         failure_pattern_counts["invalid_index"] += 1
                     if failure_reason == "observation_unstable_error":
                         failure_pattern_counts["unstable_observation"] += 1
-                    round_record.replan_reason = degraded_replan_reason or failure_reason or f"verifier_{verifier_result.status}"
+                    round_record.replan_reason = failure_reason or f"verifier_{verifier_result.status}"
+                    round_all_subtasks_succeeded = False
                     break
-                if suspicious_completion:
-                    round_record.replan_reason = suspicious_completion
-                    self._append_planner_feedback_history(
-                        task_history=task_history,
-                        round_id=round_id,
-                        status=suspicious_completion,
-                        reason="Actor kept completing the same navigation-like subtask without real state progress.",
-                        summary="Do not repeat the same navigation-stage formulation without observable progress.",
-                        observation=observation,
+            if round_all_subtasks_succeeded:
+                if self.config.stop_on_goal_complete and self._task_success_if_available(task, env):
+                    result = TaskRunResult(
+                        status="completed",
+                        planner_rounds=planner_rounds,
+                        final_observation=observation,
+                        final_task_success=True,
+                        total_actor_steps=total_actor_steps,
+                        completion_message="Task check passed after completing the current planner round.",
                     )
-                    break
-                if repeated_no_progress_reason:
-                    round_record.replan_reason = repeated_no_progress_reason
-                    self._append_planner_feedback_history(
-                        task_history=task_history,
-                        round_id=round_id,
-                        status=repeated_no_progress_reason,
-                        reason="The same normalized subtask repeated without observable progress.",
-                        summary="Avoid repeating the same stage formulation that already produced no progress.",
-                        observation=observation,
-                    )
-                    break
-                if degraded_replan_reason:
-                    round_record.replan_reason = degraded_replan_reason
-                    break
-
-            else:
-                round_record.replan_reason = "subtasks_exhausted"
+                    self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
+                    return result
+                round_record.replan_reason = "round_subtasks_verified_but_task_incomplete"
+                self._append_planner_feedback_history(
+                    task_history=task_history,
+                    round_id=round_id,
+                    status="task_incomplete_after_verified_round",
+                    reason="All subtasks in the current round were verified, but the whole task is still not complete.",
+                    summary="Use the current observation to generate the next 1-5 functional subtasks.",
+                    observation=observation,
+                )
                 continue
-
-            continue
 
         result = TaskRunResult(
             status="round_limit",
             planner_rounds=planner_rounds,
-            initial_stage_plan=initial_stage_plan_record.to_dict(),
-            stage_plan_revisions=[record.to_dict() for record in stage_plan_revisions],
             final_observation=observation,
             final_task_success=None,
             total_actor_steps=total_actor_steps,
@@ -765,12 +537,7 @@ class AndroidTaskRunner:
         subtask: PlannerSubtask,
         observation: dict[str, Any],
     ) -> dict[str, Any]:
-        form_context = _build_contact_form_context(subtask.goal, observation)
-        if form_context is None:
-            return observation
-        prepared = dict(observation)
-        prepared["contact_form_context"] = form_context
-        return prepared
+        return observation
 
     @staticmethod
     def _select_verifier_evidence_observation(
@@ -849,6 +616,36 @@ class AndroidTaskRunner:
             memory_context=memory_context,
         )
         return self.verifier.run_verification(verifier_request), evidence_source
+
+    def _build_step_verifier_callback(
+        self,
+        *,
+        subtask: PlannerSubtask,
+        before_observation: dict[str, Any],
+        memory_context: str,
+    ):
+        if self.verifier is None:
+            return None
+
+        def _verify_step(
+            *,
+            subtask: str,
+            action_history: list[dict[str, Any]],
+            before_observation: dict[str, Any],
+            evidence_observation: dict[str, Any],
+            memory_context: str,
+        ) -> dict[str, Any]:
+            verifier_request = VerifierRequest(
+                subtask=subtask,
+                action_history=action_history,
+                before_observation=before_observation,
+                evidence_observation=evidence_observation,
+                evidence_source="final_after_observation",
+                memory_context=memory_context,
+            )
+            return self.verifier.run_verification(verifier_request).to_dict()
+
+        return _verify_step
 
     @staticmethod
     def _append_actor_history(
@@ -1873,90 +1670,13 @@ class AndroidTaskRunner:
         actor_result: ActorRunResult,
         success_check: dict[str, Any],
     ) -> None:
-        form_progress = success_check.get("form_fill_progress") or {}
-        if success_check.get("saved_with_wrong_identity"):
-            observed_identity = success_check.get("observed_contact_identity") or "unknown"
-            required_identity = (success_check.get("required_contact_identity") or {}).get("full_name") or "unknown"
-            reason = (
-                f"Saved contact identity did not match the target. Observed: {observed_identity}; "
-                f"required: {required_identity}. Re-enter the editor and correct the fields."
-            )
-            task_history.append(
-                {
-                    "source": "subtask_summary",
-                    "round_id": round_id,
-                    "subtask": subtask.task,
-                    "status": "saved_with_wrong_identity",
-                    "reason": reason,
-                    "summary": reason,
-                    "action": None,
-                    "error": "",
-                    "step_id": None,
-                    "observation_unreliable_context": False,
-                }
-            )
-            return
-        if success_check.get("saved_but_task_check_failed"):
-            observed_identity = success_check.get("observed_contact_identity") or "unknown"
-            reason = (
-                "Contact details were saved, but the AndroidWorld task validator did not confirm success. "
-                f"Observed contact identity: {observed_identity}."
-            )
-            task_history.append(
-                {
-                    "source": "subtask_summary",
-                    "round_id": round_id,
-                    "subtask": subtask.task,
-                    "status": "saved_but_task_check_failed",
-                    "reason": reason,
-                    "summary": reason,
-                    "action": None,
-                    "error": "",
-                    "step_id": None,
-                    "observation_unreliable_context": False,
-                }
-            )
-            return
-        if success_check.get("terminal_failure_reason") == "field_misgrounded":
-            wrong_field = success_check.get("off_target_field_touched") or "unknown"
-            mismatch = ", ".join(success_check.get("mismatched_target_fields") or []) or "none"
-            reason = (
-                f"Grouped contact form execution drifted off target. Off-target field: {wrong_field}; "
-                f"mismatched target fields: {mismatch}."
-            )
-            task_history.append(
-                {
-                    "source": "subtask_summary",
-                    "round_id": round_id,
-                    "subtask": subtask.task,
-                    "status": "field_misgrounded",
-                    "reason": reason,
-                    "summary": reason,
-                    "action": None,
-                    "error": "",
-                    "step_id": None,
-                    "observation_unreliable_context": False,
-                }
-            )
-            return
-        if not form_progress:
-            return
-        completed_fields = form_progress.get("completed_fields") or []
-        remaining_fields = form_progress.get("remaining_fields") or []
-        if success_check.get("success_rule"):
-            status = "completed"
-            reason = (
-                f"Completed grouped contact form fill. Filled fields: {', '.join(completed_fields)}."
-            )
-        elif success_check.get("progress_made"):
-            status = "partial_progress"
-            reason = (
-                f"Partial grouped contact form progress. Filled fields: {', '.join(completed_fields) or 'none'}; "
-                f"remaining fields: {', '.join(remaining_fields) or 'none'}."
-            )
-        else:
-            status = "failed" if actor_result.status != "completed" else "completed"
-            reason = actor_result.completion_message or actor_result.status
+        status = actor_result.status
+        reason = (
+            actor_result.completion_message
+            or str(success_check.get("terminal_failure_reason") or "").strip()
+            or ("Observation changed after this subtask." if success_check.get("state_changed") else "")
+            or status
+        )
         task_history.append(
             {
                 "source": "subtask_summary",

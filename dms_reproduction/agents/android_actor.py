@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import json
 import re
-from typing import Any, Dict, List, Literal, Optional, Protocol
+from typing import Any, Callable, Dict, List, Literal, Optional, Protocol
 
 try:
     from android_world.env import json_action
@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover - fallback for local package layout
 
 ActorStatus = Literal[
     "completed",
+    "stopped",
     "infeasible",
     "step_limit",
     "parse_error",
@@ -172,11 +173,16 @@ class ActorStepResult:
     raw_response: str
     parse_error: str | None
     execution_error: str | None
-    before_observation: Dict[str, Any]
-    after_observation: Dict[str, Any] | None
-    summary: str
-    done: bool
-    done_reason: str | None
+    step_verification_triggered: bool = False
+    step_verification: Dict[str, Any] | None = None
+    step_verification_reason: str | None = None
+    heuristic_stop_triggered: bool = False
+    heuristic_stop_reason: str | None = None
+    before_observation: Dict[str, Any] = field(default_factory=dict)
+    after_observation: Dict[str, Any] | None = None
+    summary: str = ""
+    done: bool = False
+    done_reason: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -194,6 +200,11 @@ class ActorStepResult:
             "raw_response": self.raw_response,
             "parse_error": self.parse_error,
             "execution_error": self.execution_error,
+            "step_verification_triggered": self.step_verification_triggered,
+            "step_verification": self.step_verification,
+            "step_verification_reason": self.step_verification_reason,
+            "heuristic_stop_triggered": self.heuristic_stop_triggered,
+            "heuristic_stop_reason": self.heuristic_stop_reason,
             "before_observation": self.before_observation,
             "after_observation": self.after_observation,
             "summary": self.summary,
@@ -285,8 +296,10 @@ class AndroidActor:
         env: Any,
         request: ActorRequest,
         observation_adapter: ObservationAdapter,
+        step_verifier: Optional[Callable[..., Dict[str, Any]]] = None,
     ) -> ActorRunResult:
         current_observation = request.observation
+        initial_observation = request.observation
         history = list(request.action_history)
         steps: list[ActorStepResult] = []
         answer_text = ""
@@ -324,6 +337,8 @@ class AndroidActor:
                     raw_response=raw_response,
                     parse_error="Failed to parse actor action JSON.",
                     execution_error=None,
+                    heuristic_stop_triggered=False,
+                    heuristic_stop_reason=None,
                     before_observation=current_observation,
                     after_observation=None,
                     summary=_build_rule_summary(
@@ -367,6 +382,8 @@ class AndroidActor:
                     raw_response=raw_response,
                     parse_error=str(exc),
                     execution_error=None,
+                    heuristic_stop_triggered=False,
+                    heuristic_stop_reason=None,
                     before_observation=current_observation,
                     after_observation=None,
                     summary=_build_rule_summary(
@@ -391,10 +408,14 @@ class AndroidActor:
             after_observation: Dict[str, Any] | None = None
             execution_error: str | None = None
             step_status = "progress"
+            step_completion_message = ""
+            heuristic_stop_triggered = False
+            heuristic_stop_reason: str | None = None
 
             if isinstance(action, StatusAction):
                 done_reason = "completed" if action.goal_status == "complete" else "infeasible"
                 step_status = done_reason
+                step_completion_message = action.message
             else:
                 if isinstance(action, AnswerAction):
                     answer_text = action.text
@@ -412,18 +433,21 @@ class AndroidActor:
                     done_reason = "execution_error"
                     step_status = "execution_error"
 
-            toggle_control_stop = (
+            if (
                 done_reason is None
                 and after_observation is not None
-                and _should_stop_after_toggle_control_action(
+                and action is not None
+            ):
+                heuristic_stop_reason = _should_stop_for_external_verification(
                     subtask=request.subtask,
                     action=action,
                     before_observation=step_request.observation,
+                    after_observation=after_observation,
                 )
-            )
-            if toggle_control_stop:
-                done_reason = "completed"
-                step_status = "completed"
+                if heuristic_stop_reason:
+                    heuristic_stop_triggered = True
+                    done_reason = "heuristic_stop_for_external_verification"
+                    step_status = "stopped"
 
             summary = _build_rule_summary(
                 subtask=request.subtask,
@@ -434,8 +458,8 @@ class AndroidActor:
             )
             if normalization_applied and normalization_reason:
                 summary += f" Recoverable actor schema mismatch handled locally. {normalization_reason}"
-            if toggle_control_stop:
-                summary += " Toggle/control action executed; stop and let the next observation verify the state change."
+            if heuristic_stop_triggered and heuristic_stop_reason:
+                summary += f" Heuristic stop: {heuristic_stop_reason}"
             if (
                 step_request.observation.get("observation_consistency") == "unstable"
                 and action.action_type in {"wait", "navigate_back"}
@@ -456,6 +480,8 @@ class AndroidActor:
                 raw_response=raw_response,
                 parse_error=None,
                 execution_error=execution_error,
+                heuristic_stop_triggered=heuristic_stop_triggered,
+                heuristic_stop_reason=heuristic_stop_reason,
                 before_observation=step_request.observation,
                 after_observation=after_observation,
                 summary=summary,
@@ -476,7 +502,16 @@ class AndroidActor:
                     status="completed",
                     steps=steps,
                     final_observation=current_observation,
-                    completion_message=action.message if isinstance(action, StatusAction) else "",
+                    completion_message=step_completion_message,
+                    answer_text=answer_text,
+                    last_action=action.to_payload(),
+                )
+            if done_reason == "heuristic_stop_for_external_verification":
+                return ActorRunResult(
+                    status="stopped",
+                    steps=steps,
+                    final_observation=current_observation,
+                    completion_message=heuristic_stop_reason or "",
                     answer_text=answer_text,
                     last_action=action.to_payload(),
                 )
@@ -597,7 +632,7 @@ class AndroidActor:
     def _build_user_content(self, request: ActorRequest) -> List[Dict[str, Any]]:
         prompt = self._build_user_prompt(request)
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        labeled_screenshot_b64 = request.observation.get("labeled_screenshot_b64")
+        labeled_screenshot_b64 = request.observation.get("actor_labeled_screenshot_b64") or request.observation.get("labeled_screenshot_b64")
         screenshot_b64 = request.observation.get("screenshot_b64")
         image_b64 = labeled_screenshot_b64 or screenshot_b64
         if image_b64:
@@ -633,7 +668,7 @@ class AndroidActor:
             f"- Clickable UI count: {observation.get('clickable_ui_count', 0)}\n"
             f"- Non-system UI count: {observation.get('non_system_ui_count', 0)}\n"
             f"- Observation consistency: {observation_consistency}\n"
-            "- You are given the labeled screenshot in this message.\n\n"
+            "- You are given a screenshot in this message with red boxes around retained UI elements. Final action indices must come from the Visible UI index table below.\n\n"
             f"Observation warning:\n{observation_warning or 'None'}\n\n"
             f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
             f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
@@ -651,10 +686,15 @@ class AndroidActor:
             "- If the Goal is to open or launch an app and the current foreground package is not that app, prefer open_app instead of wait.\n"
             "- Do not use wait on launcher or other static screens when a concrete app-launch action is available.\n"
             "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
+            "- Only use indices that appear in the current Visible UI index table.\n"
+            "- If a number does not appear in the current Visible UI index table, it is not a legal action index.\n"
+            "- Do not copy or invent numbers from the screenshot. Use the screenshot for layout and target appearance only; use the text index table for the final action index.\n"
+            "- Do not output action_type swipe; use scroll instead.\n"
             "- If the target text is visible but that element is not clickable, do not click the non-clickable label. Choose the clickable row, parent container, or equivalent actionable element associated with that label.\n"
             "- If the target itself is directly clickable, use its exact index rather than a nearby unrelated container.\n"
             "- If the target label is visible but no matching clickable index is available in the observation, use x/y coordinates for that visible target region instead of selecting a known non-clickable label index.\n"
             "- If the target is a visible control widget such as a switch, checkbox, radio button, or icon button, and no clickable index is exposed, use a coordinate click on the control itself rather than selecting a known non-clickable index.\n"
+            "- If you can see the target but cannot map it to a legal index from the Visible UI index table, use open_app, x/y coordinates, or status infeasible instead of inventing a new index.\n"
             "- If the current subtask is to toggle, enable, or disable a visible control, do not continue tapping nearby UI after you have acted on the target control once.\n"
             "- After a meaningful control click, prefer to stop and let the next observation verify the state change.\n"
             "- If an action triggers a visible UI change, stop rather than predicting the next screen.\n"
@@ -678,7 +718,7 @@ class AndroidActor:
             "Current subtask:\n"
             f"{request.subtask}\n\n"
             "Current device state:\n"
-            "- You are given one screenshot in this message. If available, it is the labeled screenshot with red boxes and numeric indices.\n"
+            "- You are given one screenshot in this message with red boxes around retained UI elements. Final action indices must come from the Visible UI index table below.\n"
             f"- Foreground package: {foreground_package}\n"
             f"- Dominant visible UI package: {dominant_ui_package}\n"
             f"- Current activity: {observation.get('current_activity') or 'Unknown'}\n"
@@ -704,17 +744,20 @@ class AndroidActor:
             "- Base the decision on the current screen state, recent execution history, and retrieved memory context.\n"
             "- Before choosing an indexed action, first identify the visible UI element that best matches the Goal of the current subtask.\n"
             "- Treat the Goal as the primary grounding target. Use the Reason to justify the match, not to invent a different target.\n"
-            "- Match UI elements by meaning, not only by exact wording. '+', 'Create contact', 'Add contact', and 'New contact' may refer to the same creation entry point.\n"
             "- If the Goal is to open or launch an app and the current foreground package is not that app, prefer open_app instead of wait.\n"
             "- Do not use wait on launcher or other static screens when a concrete app-launch action is available.\n"
+            "- Only use indices that appear in the current Visible UI index table.\n"
+            "- If a number does not appear in the current Visible UI index table, it is not a legal action index.\n"
+            "- Do not copy or invent numbers from the screenshot. Use the screenshot for layout and target appearance only; use the text index table for the final action index.\n"
+            "- Do not output action_type swipe; use scroll instead.\n"
             "- Do not choose an index only because it is nearby, visually salient, or contains a partially related word.\n"
             "- Do not click a non-clickable label. If the label names the target but only the parent row or container is clickable, choose that actionable row or container.\n"
             "- If the target label is visible but no matching clickable index is available in the observation, use a coordinate click on the visible target region instead of selecting a known non-clickable label index.\n"
             "- If the target is a visible control widget such as a switch, checkbox, radio button, or icon button, and no clickable index is exposed, use a coordinate click on the control itself.\n"
+            "- If you can see the target but cannot map it to a legal index from the Visible UI index table, use open_app, x/y coordinates, or status infeasible instead of inventing a new index.\n"
             "- If the current subtask is to toggle, enable, or disable a visible control, do not continue tapping nearby UI after you have acted on the target control once.\n"
             "- After a meaningful control click, prefer to stop and let the next observation verify the state change.\n"
             "- Do not click an unrelated tab or container just because its wording looks partially related.\n"
-            "- If the Goal is to create or add a contact, prefer the visible creation entry element rather than the currently selected Contacts tab.\n"
             "- In the Reason, explicitly name the grounded target element before giving the action.\n"
             "- If a previous action failed or produced no progress, do not repeat it unchanged. Change strategy or return infeasible.\n"
             "- If an action causes a visible UI change, stop rather than predicting the next screen.\n"
@@ -732,20 +775,19 @@ class AndroidActor:
         dominant_ui_package = observation.get("app_name") or "Unknown"
         observation_warning = observation.get("observation_warning")
         observation_consistency = observation.get("observation_consistency") or "stable"
-        contact_form_context = observation.get("contact_form_context") or {}
-        contact_form_block = ""
-        if contact_form_context:
-            contact_form_block = (
-                "Grouped contact form constraints:\n"
-                f"- Target fields only: {json.dumps(contact_form_context.get('target_fields') or [], ensure_ascii=False)}\n"
-                f"- Expected values: {json.dumps(contact_form_context.get('expected_fields') or {}, ensure_ascii=False)}\n"
-                f"- Current values: {json.dumps(contact_form_context.get('current_values') or {}, ensure_ascii=False)}\n"
-                f"- Remaining fields: {json.dumps(contact_form_context.get('remaining_fields') or [], ensure_ascii=False)}\n"
-                f"- Required field indices: {json.dumps(contact_form_context.get('required_field_indices') or {}, ensure_ascii=False)}\n"
+        form_fill_context = observation.get("form_fill_context") or {}
+        form_fill_block = ""
+        if form_fill_context:
+            form_fill_block = (
+                "Grouped form-fill constraints:\n"
+                f"- Target fields only: {json.dumps(form_fill_context.get('target_fields') or [], ensure_ascii=False)}\n"
+                f"- Expected values: {json.dumps(form_fill_context.get('expected_fields') or {}, ensure_ascii=False)}\n"
+                f"- Current values: {json.dumps(form_fill_context.get('current_values') or {}, ensure_ascii=False)}\n"
+                f"- Remaining fields: {json.dumps(form_fill_context.get('remaining_fields') or [], ensure_ascii=False)}\n"
+                f"- Required field indices: {json.dumps(form_fill_context.get('required_field_indices') or {}, ensure_ascii=False)}\n"
                 "- Only edit those required fields.\n"
-                "- Do not type into unrelated editable fields such as Company.\n"
-                "- Do not click Save until every required field matches the expected value.\n"
-                "- If the keyboard is active in the contact editor, keep working on the required fields instead of navigating away.\n\n"
+                "- Do not click Save, Done, Apply, or Submit until every required field matches the expected value.\n"
+                "- If the keyboard is active while filling the form, keep working on the required fields instead of navigating away.\n\n"
             )
         return (
             f"Subtask:\n{request.subtask}\n\n"
@@ -758,24 +800,27 @@ class AndroidActor:
             f"- Clickable UI count: {observation.get('clickable_ui_count', 0)}\n"
             f"- Non-system UI count: {observation.get('non_system_ui_count', 0)}\n"
             f"- Observation consistency: {observation_consistency}\n"
-            "- You are given the labeled screenshot in this message.\n\n"
+            "- You are given a screenshot in this message with red boxes around retained UI elements. Final action indices must come from the Visible UI index table below.\n\n"
             f"Observation warning:\n{observation_warning or 'None'}\n\n"
             f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
             f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
             f"Recent action history:\n{self._format_history(request.action_history)}\n\n"
             "Retrieved memory context:\n"
             f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
-            f"{contact_form_block}"
+            f"{form_fill_block}"
             "Decision policy:\n"
             "- Execute this subtask step by step using one valid GUI action.\n"
             "- Base the choice on the current GUI state, history, and memory.\n"
             "- Prefer the smallest necessary action that advances the subtask.\n"
             "- Use status complete only when the Goal in the current subtask is satisfied.\n"
             "- Do not use status complete for navigation subtasks solely because the app is already open.\n"
+            "- Only use indices that appear in the current Visible UI index table.\n"
+            "- If a number does not appear in the current Visible UI index table, it is not a legal action index.\n"
+            "- Do not copy or invent numbers from the screenshot. Use the screenshot for layout and target appearance only; use the text index table for the final action index.\n"
+            "- Do not output action_type swipe; use scroll instead.\n"
             "- If the subtask describes filling a form section, only edit the required related fields for that section and do not continue to save or navigate away.\n"
-            "- In a grouped contact form task, treat the allowed target fields as a hard constraint.\n"
+            "- In a grouped form-fill task, treat the allowed target fields as a hard constraint.\n"
             "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
-            "- If the target is Phone and [#2] is the Phone element, use index 2, not a nearby container.\n"
             "- If the observation warning indicates degraded UI, avoid assuming the goal is complete.\n"
             "- If observation consistency is unstable, prefer wait or navigate_back rather than blind taps.\n"
             "- If the current path is blocked or not feasible, use status infeasible.\n"
@@ -1063,6 +1108,7 @@ def normalize_actor_action_payload(payload: dict[str, Any]) -> tuple[dict[str, A
         "enter_text": "input_text",
         "fill_text": "input_text",
         "set_text": "input_text",
+        "swipe": "scroll",
     }
     canonical_action = alias_map.get(action_type)
     if canonical_action is None:
@@ -1220,16 +1266,10 @@ def _extract_target_token(
             return normalized
     combined_text = " ".join(filter(None, [goal_text, reason])).lower()
     for token in (
-        "create new contact",
-        "add contact",
-        "create contact",
-        "new contact",
         "network & internet",
         "wi-fi",
         "wifi",
         "bluetooth",
-        "phone",
-        "contacts",
     ):
         if token in combined_text:
             return _normalize_match_text(token)
@@ -1319,18 +1359,29 @@ def _goal_or_reason_requests_toggle(subtask: str, reason: str) -> bool:
     return any(marker in combined_text for marker in toggle_markers)
 
 
-def _should_stop_after_toggle_control_action(
+def _should_stop_for_external_verification(
     *,
     subtask: str,
     action: ActorAction | None,
     before_observation: Dict[str, Any],
-) -> bool:
-    if action is None or action.action_type not in {"click", "long_press"}:
-        return False
-    if not _goal_or_reason_requests_toggle(subtask, ""):
-        return False
+    after_observation: Dict[str, Any],
+) -> str | None:
+    if action is None:
+        return None
+    if action.action_type in {"wait", "status", "answer"}:
+        return None
     target = _resolve_action_target_element(action, before_observation)
-    return target is not None and _is_control_like_target(target)
+    if target is not None and _is_control_like_target(target) and _goal_or_reason_requests_toggle(subtask, ""):
+        return "Meaningful control action executed; stop and let the external verifier check the resulting state."
+    if action.action_type == "open_app":
+        return "App launch action executed; stop and let the external verifier check whether the target app is now open."
+    if action.action_type in {"navigate_back", "navigate_home"}:
+        return "Navigation action executed; stop and let the external verifier inspect the resulting screen."
+    if action.action_type in {"input_text", "keyboard_enter"}:
+        return "Form-editing action executed; stop and let the external verifier inspect the updated field state."
+    if action.action_type in {"click", "long_press"}:
+        return "High-impact pointing action executed; stop and let the external verifier inspect the resulting screen."
+    return None
 
 
 def _resolve_action_target_element(
@@ -1402,10 +1453,6 @@ def _element_matches_token(element: dict[str, Any], token: str) -> bool:
         _normalize_match_text(element.get("resource_name") or ""),
     ]
     aliases = {
-        "create new contact": {"create new contact", "add contact", "create contact", "new contact"},
-        "add contact": {"create new contact", "add contact", "create contact", "new contact"},
-        "create contact": {"create new contact", "add contact", "create contact", "new contact"},
-        "new contact": {"create new contact", "add contact", "create contact", "new contact"},
         "wifi": {"wifi", "wi-fi"},
         "wi-fi": {"wifi", "wi-fi"},
     }

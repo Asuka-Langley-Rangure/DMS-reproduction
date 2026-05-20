@@ -115,6 +115,7 @@ class AndroidWorldObservationAdapter:
 
         raw_image = Image.fromarray(state.pixels).convert("RGB")
         labeled_image = draw_labeled_screenshot(state, valid_ui_indices)
+        actor_labeled_image = draw_labeled_screenshot(state, valid_ui_indices, draw_indices=False)
         foreground_package = self._extract_foreground_package(current_activity)
         dominant_ui_package = self._infer_dominant_ui_package(standardized_ui)
         visible_ui_count = len(standardized_ui)
@@ -171,6 +172,7 @@ class AndroidWorldObservationAdapter:
             "unstable_reasons": consistency_notes,
             "screenshot_b64": None,
             "labeled_screenshot_b64": None,
+            "actor_labeled_screenshot_b64": None,
             "extra_state": {
                 "step_id": step_id,
                 "orientation": getattr(env, "orientation", None),
@@ -183,6 +185,7 @@ class AndroidWorldObservationAdapter:
         if include_screenshots:
             observation["screenshot_b64"] = pil_to_base64_png(raw_image)
             observation["labeled_screenshot_b64"] = pil_to_base64_png(labeled_image)
+            observation["actor_labeled_screenshot_b64"] = pil_to_base64_png(actor_labeled_image)
 
         return observation
 

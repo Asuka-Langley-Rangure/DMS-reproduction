@@ -101,6 +101,7 @@ def build_observation(
         "observation_consistency": observation_consistency,
         "screenshot_b64": "AAA",
         "labeled_screenshot_b64": "BBB",
+        "actor_labeled_screenshot_b64": "CCC",
         "extra_state": {"step_id": step_id, "orientation": 0},
     }
 
@@ -151,7 +152,9 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Retrieved memory context", user_prompt)
         self.assertIn("Execute exactly one GUI action at a time", user_prompt)
         self.assertIn("Treat the Goal as the primary grounding target", user_prompt)
-        self.assertIn("'+', 'Create contact', 'Add contact', and 'New contact'", user_prompt)
+        self.assertIn("Only use indices that appear in the current Visible UI index table", user_prompt)
+        self.assertIn("Do not copy or invent numbers from the screenshot", user_prompt)
+        self.assertIn("Do not output action_type swipe; use scroll instead", user_prompt)
         self.assertIn("Return exactly one action in the required JSON action format", user_prompt)
         self.assertNotIn("Visible UI elements JSON", user_prompt)
 
@@ -178,11 +181,11 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("do not continue tapping nearby UI after you have acted on the target control once", user_prompt)
         self.assertIn("prefer to stop and let the next observation verify the state change", user_prompt)
 
-    def test_prompt_includes_grouped_contact_form_constraints(self) -> None:
+    def test_prompt_includes_grouped_form_fill_constraints(self) -> None:
         llm = FakeLLMClient(['Reason: fill first name.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
         actor = AndroidActor(llm, ActorConfig(prompt_profile="legacy_contact_tuned"))
         observation = build_observation(activity="com.google.android.contacts/.activities.ContactEditorActivity")
-        observation["contact_form_context"] = {
+        observation["form_fill_context"] = {
             "target_fields": ["first_name", "last_name", "phone"],
             "expected_fields": {"first_name": "Mia", "last_name": "Fernandez", "phone": "+13268155334"},
             "current_values": {"first_name": "", "last_name": "", "phone": ""},
@@ -195,16 +198,16 @@ class ActorPromptTest(unittest.TestCase):
         )
 
         user_prompt = extract_user_text(actor.build_messages(request))
-        self.assertIn("Grouped contact form constraints", user_prompt)
+        self.assertIn("Grouped form-fill constraints", user_prompt)
         self.assertIn("Only edit those required fields", user_prompt)
-        self.assertIn("Do not click Save until every required field matches the expected value", user_prompt)
+        self.assertIn("Do not click Save, Done, Apply, or Submit until every required field matches the expected value", user_prompt)
         self.assertIn("\"first_name\": 5", user_prompt)
 
     def test_generic_prompt_ignores_contact_form_specific_block(self) -> None:
         llm = FakeLLMClient(['Reason: fill a field.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
         actor = AndroidActor(llm, ActorConfig(prompt_profile="generic_paper"))
         observation = build_observation(activity="com.google.android.contacts/.activities.ContactEditorActivity")
-        observation["contact_form_context"] = {
+        observation["form_fill_context"] = {
             "target_fields": ["first_name", "last_name", "phone"],
             "expected_fields": {"first_name": "Mia", "last_name": "Fernandez", "phone": "+13268155334"},
             "current_values": {"first_name": "", "last_name": "", "phone": ""},
@@ -235,6 +238,9 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Visible UI elements JSON:", user_prompt)
         self.assertIn("Decision policy:", user_prompt)
         self.assertIn("prefer open_app instead of wait", user_prompt)
+        self.assertIn("Only use indices that appear in the current Visible UI index table", user_prompt)
+        self.assertIn("Do not copy or invent numbers from the screenshot", user_prompt)
+        self.assertIn("Do not output action_type swipe; use scroll instead", user_prompt)
         self.assertIn("do not click the non-clickable label", user_prompt.lower())
         self.assertIn("use x/y coordinates for that visible target region instead", user_prompt)
         self.assertIn("use a coordinate click on the control itself", user_prompt)
@@ -243,6 +249,20 @@ class ActorPromptTest(unittest.TestCase):
         self.assertNotIn("Current subtask:", user_prompt)
         self.assertNotIn("Current device state:", user_prompt)
         self.assertNotIn("Acting rules:", user_prompt)
+
+    def test_build_messages_prefers_actor_specific_box_only_screenshot(self) -> None:
+        llm = FakeLLMClient(['Reason: tap.\nAction: {"action_type":"click","index":3}'])
+        actor = AndroidActor(llm, ActorConfig(prompt_profile="generic_self_written"))
+        request = ActorRequest(
+            subtask="Precondition: Contacts is open. Goal: Tap create contact.",
+            observation=build_observation(),
+        )
+
+        messages = actor.build_messages(request)
+        content = messages[1]["content"]
+        image_items = [item for item in content if item["type"] == "image_url"]
+        self.assertEqual(len(image_items), 1)
+        self.assertIn("CCC", image_items[0]["image_url"]["url"])
 
 
 class ActorActionParsingTest(unittest.TestCase):
@@ -280,6 +300,17 @@ class ActorActionParsingTest(unittest.TestCase):
         action, _, _, _, _, _ = parse_actor_action({"action_type": "scroll", "direction": "down"}, build_observation())
         self.assertIsInstance(action, ScrollAction)
         self.assertIsNone(action.index)
+
+    def test_parse_swipe_alias_normalizes_to_scroll(self) -> None:
+        action, normalized, normalization_applied, normalization_reason, _, _ = parse_actor_action(
+            {"action_type": "swipe", "direction": "up"},
+            build_observation(),
+        )
+        self.assertIsInstance(action, ScrollAction)
+        self.assertEqual(action.direction, "up")
+        self.assertTrue(normalization_applied)
+        self.assertEqual(normalized, {"action_type": "scroll", "direction": "up"})
+        self.assertIn("Normalized action_type", normalization_reason or "")
 
     def test_parse_valid_click_coordinates_action(self) -> None:
         action, _, _, _, _, _ = parse_actor_action(
@@ -647,6 +678,102 @@ class ActorExecutionTest(unittest.TestCase):
         self.assertEqual(len(result.steps), 1)
         self.assertIn("Toggle/control action executed", result.steps[0].summary)
         self.assertEqual(len(env.actions), 1)
+
+    def test_step_verifier_success_stops_after_high_value_action(self) -> None:
+        llm = FakeLLMClient(
+            [
+                'Reason: tap create.\nAction: {"action_type":"click","index":3}',
+                'Reason: should not be needed.\nAction: {"action_type":"status","goal_status":"complete","message":"late"}',
+            ]
+        )
+        actor = AndroidActor(llm, ActorConfig(max_steps=2))
+        env = FakeEnv()
+        adapter = FakeObservationAdapter()
+        step_verifier_calls = []
+
+        def step_verifier(**kwargs):
+            step_verifier_calls.append(kwargs)
+            return {
+                "status": "success",
+                "reason": "The subtask is already complete after this action.",
+                "memory_eligible": True,
+            }
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(subtask="Tap create contact", observation=build_observation()),
+            adapter,
+            step_verifier=step_verifier,
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(result.steps), 1)
+        self.assertTrue(result.steps[0].step_verification_triggered)
+        self.assertEqual(result.steps[0].step_verification["status"], "success")
+        self.assertEqual(result.steps[0].done_reason, "step_verifier_subtask_complete")
+        self.assertEqual(result.completion_message, "The subtask is already complete after this action.")
+        self.assertEqual(len(step_verifier_calls), 1)
+        self.assertEqual(len(llm.messages), 1)
+
+    def test_step_verifier_failure_allows_actor_to_continue(self) -> None:
+        llm = FakeLLMClient(
+            [
+                'Reason: tap create.\nAction: {"action_type":"click","index":3}',
+                'Reason: now complete.\nAction: {"action_type":"status","goal_status":"complete","message":"done"}',
+            ]
+        )
+        actor = AndroidActor(llm, ActorConfig(max_steps=2))
+        env = FakeEnv()
+        adapter = FakeObservationAdapter()
+        step_verifier_calls = []
+
+        def step_verifier(**kwargs):
+            step_verifier_calls.append(kwargs)
+            return {
+                "status": "failure",
+                "reason": "Not complete yet.",
+                "memory_eligible": False,
+            }
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(subtask="Tap create contact", observation=build_observation()),
+            adapter,
+            step_verifier=step_verifier,
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(result.steps), 2)
+        self.assertTrue(result.steps[0].step_verification_triggered)
+        self.assertEqual(result.steps[0].step_verification["status"], "failure")
+        self.assertEqual(len(step_verifier_calls), 1)
+
+    def test_wait_does_not_trigger_step_verifier(self) -> None:
+        llm = FakeLLMClient(
+            [
+                'Reason: wait.\nAction: {"action_type":"wait"}',
+                'Reason: complete.\nAction: {"action_type":"status","goal_status":"complete","message":"done"}',
+            ]
+        )
+        actor = AndroidActor(llm, ActorConfig(max_steps=2))
+        env = FakeEnv()
+        adapter = FakeObservationAdapter()
+        step_verifier_calls = []
+
+        def step_verifier(**kwargs):
+            step_verifier_calls.append(kwargs)
+            return {"status": "success", "reason": "should not run", "memory_eligible": True}
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(subtask="Wait until page settles", observation=build_observation()),
+            adapter,
+            step_verifier=step_verifier,
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertFalse(result.steps[0].step_verification_triggered)
+        self.assertEqual(step_verifier_calls, [])
 
     def test_status_complete_terminates_immediately(self) -> None:
         llm = FakeLLMClient(['Reason: done.\nAction: {"action_type":"status","goal_status":"complete","message":"ok"}'])
