@@ -857,6 +857,40 @@ class TaskRunnerTest(unittest.TestCase):
         self.assertEqual(result.status, "round_limit")
         self.assertEqual(result.planner_rounds[0].replan_reason, "planner_subtask_not_grounded_in_observation")
 
+    def test_planner_open_app_goal_is_not_vetoed_when_target_app_label_is_absent(self) -> None:
+        planner = FakePlanner(
+            [
+                PlannerResult(
+                    is_goal_complete=False,
+                    subtasks=[
+                        PlannerSubtask(
+                            "The Contacts app is not open.",
+                            "Open the Contacts app.",
+                            "The Contacts app is not visible on the current screen, and the goal is to open the Contacts app.",
+                        )
+                    ],
+                )
+            ]
+        )
+        actor = FakeActor(
+            [
+                ActorRunResult(
+                    status="step_limit",
+                    steps=[],
+                    final_observation=build_observation("after"),
+                    completion_message="",
+                    last_action=None,
+                )
+            ]
+        )
+        adapter = FakeObservationAdapter([build_observation("initial")])
+        runner = AndroidTaskRunner(planner, actor, adapter, TaskRunConfig(max_planner_rounds=1))
+
+        result = runner.run_task(FakeEnv(), FakeTask([]), "Create a contact")
+
+        self.assertNotEqual(result.planner_rounds[0].replan_reason, "planner_subtask_not_grounded_in_observation")
+        self.assertEqual(len(actor.calls), 1)
+
     def test_runner_marks_open_phone_app_completed_after_successful_first_step(self) -> None:
         planner = FakePlanner(
             [

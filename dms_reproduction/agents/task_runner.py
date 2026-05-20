@@ -1621,6 +1621,9 @@ class AndroidTaskRunner:
         for subtask in subtasks:
             combined_text = f"{subtask.goal} {subtask.reason}".lower()
             matched_targets = [target for target in high_risk_targets if target in combined_text]
+            is_app_opening_goal = bool(re.search(r"\b(open|launch)\b", subtask.goal.lower())) and bool(
+                re.search(r"\bapp\b", subtask.goal.lower())
+            )
             claims_current_visibility = any(
                 marker in combined_text
                 for marker in ("visible", "clearly visible", "shown", "available", "clickable", "appeared")
@@ -1641,7 +1644,8 @@ class AndroidTaskRunner:
                 }
             )
             if matched_targets and not grounded and (
-                claims_current_visibility or any(target in {"create new contact", "add contact"} for target in matched_targets)
+                (claims_current_visibility and not is_app_opening_goal)
+                or any(target in {"create new contact", "add contact"} for target in matched_targets)
             ):
                 veto_reason = "planner_subtask_not_grounded_in_observation"
         return checks, veto_reason

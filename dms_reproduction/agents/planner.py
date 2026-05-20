@@ -327,7 +327,7 @@ class AndroidTaskPlanner:
                     repair_reason=repair_reason,
                 )
 
-            task_text = item.get("task")
+            task_text = coerce_task_text(item)
             reason = item.get("reason")
             if not isinstance(task_text, str) or not task_text.strip():
                 return PlannerResult(
@@ -379,6 +379,10 @@ class AndroidTaskPlanner:
                 repaired_parse = True
                 if repair_reason is None:
                     repair_reason = "synthesized_precondition_none_for_legacy_task_text"
+            elif task_text != item.get("task"):
+                repaired_parse = True
+                if repair_reason is None:
+                    repair_reason = "merged_split_precondition_goal_fields"
 
             precondition, goal = parsed
             subtasks.append(
@@ -892,6 +896,8 @@ class AndroidTaskPlanner:
             "That subtask must be a functional goal.\n"
             "A **precondition** describing the expected starting screen/state for that subtask is required.\n"
             "Each task string must use \"Precondition: ... Goal: ...\".\n"
+            "The task field must be one single string that contains both Precondition and Goal.\n"
+            "Do not return a separate Goal field or separate Precondition field inside a task object.\n"
             "The Precondition must describe the current observable state BEFORE the Actor starts this subtask.\n"
             "It must be true in the current observation.\n"
             "Do not write a precondition that will only become true after completing an earlier stage.\n"
@@ -976,6 +982,8 @@ class AndroidTaskPlanner:
             "- Consider complete_goal only as an exception after the previous three checks.\n"
             "- If you return set_tasks, you must return current_stage_id and at least one task.\n"
             "- Every step must use 'Precondition: ... Goal: ...'.\n"
+            "- The task field must be one single string that contains both Precondition and Goal.\n"
+            "- Do not return a separate Goal field or separate Precondition field inside a task object.\n"
             "- The Precondition must describe the current observable state BEFORE the Actor starts this subtask.\n"
             "- It must be true in the current observation.\n"
             "- Do not write a precondition that will only become true after completing an earlier stage.\n"
@@ -1041,6 +1049,8 @@ class AndroidTaskPlanner:
             f"- If not complete, first refresh a 1-{self.config.max_subtasks} stage high-level plan, then return the next functional steps for the current stage.\n"
             "- Return stage_plan as a list of high-level milestones plus current_stage_id.\n"
             "- Every step must use 'Precondition: ... Goal: ...'.\n"
+            "- The task field must be one single string that contains both Precondition and Goal.\n"
+            "- Do not return a separate Goal field or separate Precondition field inside a task object.\n"
             "- Do not output low-level actions or atomic UI operations.\n"
             "- Each Goal should be one short natural-language small objective.\n"
             "- Each Goal should produce a verifiable UI state change after completion.\n"
@@ -1343,6 +1353,50 @@ def synthesize_precondition_goal_task(task_text: str) -> str | None:
     return f"Precondition: None. Goal: {stripped}"
 
 
+def coerce_task_text(task_item: Dict[str, Any]) -> str | Any:
+    task_text = task_item.get("task")
+    if not isinstance(task_text, str):
+        return task_text
+
+    stripped_task = task_text.strip()
+    if not stripped_task:
+        return task_text
+
+    if parse_precondition_goal(stripped_task) is not None:
+        return task_text
+
+    if not re.match(r"(?is)^precondition\s*:", stripped_task):
+        return task_text
+
+    goal_text = _extract_split_goal_text(task_item)
+    if not goal_text:
+        return task_text
+
+    return f"{stripped_task} Goal: {goal_text}"
+
+
+def _extract_split_goal_text(task_item: Dict[str, Any]) -> str | None:
+    goal_value = task_item.get("Goal")
+    if isinstance(goal_value, str) and goal_value.strip():
+        return goal_value.strip()
+
+    for key, value in task_item.items():
+        if not isinstance(key, str):
+            continue
+        match = re.match(r"(?is)^goal\s*:\s*(.+?)\s*$", key.strip())
+        if not match:
+            continue
+
+        key_goal = match.group(1).strip()
+        if key_goal:
+            return key_goal
+
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
+
+
 def _validate_stage_subtask_alignment(
     *,
     stage_plan: list[PlannerStage],
@@ -1552,13 +1606,22 @@ def repair_planner_payload(raw_response: str) -> tuple[dict[str, Any] | None, st
 
     items: list[dict[str, Any]] = []
     pair_pattern = re.compile(
-        r'"task"\s*:\s*"(?P<task>.+?)(?:"\s*,\s*"reason"\s*:\s*"|;\s*reason"\s*:\s*")(?P<reason>.+?)"',
+        r'"task"\s*:\s*"(?P<task>.+?)'
+        r'(?:(?:"\s*,\s*"Goal"\s*:\s*"(?P<goal_value>.+?))|(?:"\s*,\s*"(?P<goal_key>Goal\s*:\s*.+?)))?'
+        r'(?:"\s*,\s*"reason"\s*:\s*"|;\s*reason"\s*:\s*")(?P<reason>.+?)"',
         flags=re.DOTALL,
     )
     for match in pair_pattern.finditer(cleaned):
+        task_text = match.group("task").strip()
+        goal_value = match.group("goal_value")
+        goal_key = match.group("goal_key")
+        if goal_value:
+            task_text = f"{task_text} Goal: {goal_value.strip()}"
+        elif goal_key:
+            task_text = f"{task_text} {goal_key.strip()}"
         items.append(
             {
-                "task": match.group("task").strip(),
+                "task": task_text,
                 "reason": match.group("reason").strip(),
             }
         )

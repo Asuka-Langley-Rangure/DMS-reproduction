@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a planner + actor closed-loop smoke test on AndroidWorld."
     )
-    parser.add_argument("--task", default="SystemWifiTurnOff")
+    parser.add_argument("--task", default="ContactsAddContact")
     parser.add_argument("--output_dir", default="task_loop_smoke_runs")
     parser.add_argument("--base_url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api_key", default="dms-qwen-secret")

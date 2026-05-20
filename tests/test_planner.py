@@ -117,6 +117,8 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertIn("The Precondition must describe the current observable state BEFORE the Actor starts this subtask.", user_prompt)
         self.assertIn("It must be true in the current observation.", user_prompt)
         self.assertIn("Do not write a precondition that will only become true after completing an earlier stage.", user_prompt)
+        self.assertIn("The task field must be one single string that contains both Precondition and Goal.", user_prompt)
+        self.assertIn("Do not return a separate Goal field or separate Precondition field inside a task object.", user_prompt)
         self.assertIn("Do not return duplicate or near-duplicate tasks", user_prompt)
         self.assertIn("rewrite it as the milestone state", user_prompt)
         self.assertIn("planner_complete_but_task_check_failed", user_prompt)
@@ -227,6 +229,8 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertIn("Planner instruction:", user_prompt)
         self.assertIn("Visible UI elements summary:", user_prompt)
         self.assertIn("The Precondition must describe the current observable state BEFORE the Actor starts this subtask.", user_prompt)
+        self.assertIn("The task field must be one single string that contains both Precondition and Goal.", user_prompt)
+        self.assertIn("Do not return a separate Goal field or separate Precondition field inside a task object.", user_prompt)
         self.assertNotIn("covered_stage_ids", user_prompt)
         self.assertNotIn("User's Overall Goal", user_prompt)
         self.assertNotIn("Current Device State", user_prompt)
@@ -313,6 +317,32 @@ class PlannerParsingTest(unittest.TestCase):
         )
         self.assertEqual(len(result.subtasks), 1)
         self.assertEqual(result.subtasks[0].precondition, "None.")
+        self.assertEqual(result.subtasks[0].goal, "Open the Contacts app.")
+
+    def test_parse_split_precondition_and_goal_fields_is_repaired(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","current_stage_id":1,"tasks":['
+            '{"task":"Precondition: The Contacts app is not currently open.","Goal":"Open the Contacts app.",'
+            '"reason":"The Contacts app is not visible on the current screen, so the first step is to open it."}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIsNone(result.parse_error)
+        self.assertTrue(result.repaired_parse)
+        self.assertEqual(result.repair_reason, "merged_split_precondition_goal_fields")
+        self.assertEqual(result.subtasks[0].precondition, "The Contacts app is not currently open.")
+        self.assertEqual(result.subtasks[0].goal, "Open the Contacts app.")
+
+    def test_parse_split_goal_embedded_in_field_name_is_repaired(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","current_stage_id":1,"tasks":['
+            '{"task":"Precondition: The Contacts app is not currently open.","Goal: Open the Contacts app.":null,'
+            '"reason":"The Contacts app is not visible on the current screen, so the first step is to open it."}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIsNone(result.parse_error)
+        self.assertTrue(result.repaired_parse)
+        self.assertEqual(result.repair_reason, "merged_split_precondition_goal_fields")
+        self.assertEqual(result.subtasks[0].precondition, "The Contacts app is not currently open.")
         self.assertEqual(result.subtasks[0].goal, "Open the Contacts app.")
 
     def test_parse_stage_plan_response_requires_three_to_five_stages(self) -> None:
@@ -467,6 +497,17 @@ class PlannerParsingTest(unittest.TestCase):
         self.assertTrue(result.repaired_parse)
         self.assertEqual(len(result.subtasks), 1)
         self.assertIn("Tap on the Create new contact button.", result.subtasks[0].goal)
+
+    def test_parse_response_repairs_near_json_split_goal_field(self) -> None:
+        raw = (
+            '{"tool":"set_tasks","current_stage_id":1,"tasks":[{"task":"Precondition: The Contacts app is not open.", '
+            '"Goal: Open the Contacts app.", "reason":"The Contacts app is not currently open, so the first step is to launch it."}]}'
+        )
+        result = self.planner.parse_response(raw)
+        self.assertIsNone(result.parse_error)
+        self.assertTrue(result.repaired_parse)
+        self.assertEqual(result.subtasks[0].precondition, "The Contacts app is not open.")
+        self.assertEqual(result.subtasks[0].goal, "Open the Contacts app.")
 
 
 if __name__ == "__main__":

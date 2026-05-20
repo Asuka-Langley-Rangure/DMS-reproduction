@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Protocol
+from typing import Any, Dict, List, Protocol, Optional
 
 
 @dataclass
@@ -17,6 +17,24 @@ class MemoryEvent:
     verifier_evidence_source: str
     success_check: Dict[str, Any]
     observation_digest: Dict[str, Any]
+    event_type: str | None = None
+    success: bool | None = None
+    global_success: bool | None = None
+    task_success: bool | None = None
+    selected_memory_id: str | None = None
+    used_memory: bool | None = None
+    should_replay: bool | None = None
+    should_mutate: bool | None = None
+    retrieval_score: float | None = None
+    sim_goal: float | None = None
+    sim_precondition: float | None = None
+    survival_value: float | None = None
+    risk_score: float | None = None
+    memory_read_reason: str | None = None
+    invalid_action_count: int | None = None
+    no_state_change_count: int | None = None
+    parse_error_count: int | None = None
+    execution_error_count: int | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
