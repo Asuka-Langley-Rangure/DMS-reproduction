@@ -225,15 +225,45 @@ class PlannerPromptTest(unittest.TestCase):
         user_prompt = extract_user_text(llm.messages)
         self.assertIn("User overall goal:", user_prompt)
         self.assertIn("Current device state:", user_prompt)
-        self.assertIn("Frozen stage plan:", user_prompt)
-        self.assertIn("Planner instruction:", user_prompt)
+        self.assertIn("Current-stage hint:", user_prompt)
+        self.assertIn("History usage note:", user_prompt)
+        self.assertIn("Planning instruction:", user_prompt)
         self.assertIn("Visible UI elements summary:", user_prompt)
-        self.assertIn("The Precondition must describe the current observable state BEFORE the Actor starts this subtask.", user_prompt)
-        self.assertIn("The task field must be one single string that contains both Precondition and Goal.", user_prompt)
-        self.assertIn("Do not return a separate Goal field or separate Precondition field inside a task object.", user_prompt)
+        self.assertIn("The current observation has higher priority than earlier task history.", user_prompt)
+        self.assertIn("do not repeat an app-opening subtask", user_prompt)
         self.assertNotIn("covered_stage_ids", user_prompt)
         self.assertNotIn("User's Overall Goal", user_prompt)
         self.assertNotIn("Current Device State", user_prompt)
+
+    def test_generic_self_written_prompt_adds_contact_stage_hint_when_create_contact_entry_visible(self) -> None:
+        llm = FakeLLMClient(response='{"tool":"complete_goal","message":"done"}')
+        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5, prompt_profile="generic_self_written"))
+        observation = {
+            "current_activity": "com.google.android.dialer/com.google.android.dialer.extensions.GoogleDialtactsActivity",
+            "app_name": "com.google.android.dialer",
+            "ui_description": (
+                "UI element 0: text='Your contacts are just a tap away here'; "
+                "UI element 1: text='Create new contact'; "
+                "UI element 2: content_description='Contacts'"
+            ),
+            "screenshot_b64": "AAA",
+            "labeled_screenshot_b64": "BBB",
+        }
+
+        planner.plan(
+            user_goal="Create a new contact for Ahmed da Silva. Their number is +12459301917.",
+            observation=observation,
+            task_history=[],
+            memory_context="",
+        )
+
+        user_prompt = extract_user_text(llm.messages)
+        self.assertIn("Current-stage hint:", user_prompt)
+        self.assertIn("already inside the Phone/Dialer or Contacts workspace", user_prompt)
+        self.assertIn("A create-contact entry point is visible now", user_prompt)
+        self.assertIn("History usage note:", user_prompt)
+        self.assertIn("do not repeat an app-opening subtask", user_prompt)
+        self.assertIn("Only use an opening-app subtask if the current observation is not already inside the relevant app/workspace.", user_prompt)
 
 
 class PlannerParsingTest(unittest.TestCase):

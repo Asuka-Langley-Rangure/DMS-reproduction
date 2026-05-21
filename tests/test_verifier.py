@@ -49,6 +49,7 @@ class VerifierTest(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "success")
+        self.assertEqual(result.source, "llm_verifier")
         self.assertEqual(result.reason, "goal visible")
         self.assertTrue(result.memory_eligible)
         self.assertFalse(result.parse_error)
@@ -68,6 +69,7 @@ class VerifierTest(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failure")
+        self.assertEqual(result.source, "llm_verifier")
         self.assertEqual(result.reason, "wrong screen")
         self.assertFalse(result.memory_eligible)
 
@@ -86,6 +88,7 @@ class VerifierTest(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "uncertain")
+        self.assertEqual(result.source, "llm_verifier")
         self.assertEqual(result.reason, "not enough evidence")
 
     def test_invalid_json_returns_uncertain_parse_error(self) -> None:
@@ -103,6 +106,7 @@ class VerifierTest(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "uncertain")
+        self.assertEqual(result.source, "llm_verifier")
         self.assertEqual(result.memory_eligible, False)
         self.assertTrue(result.parse_error)
 
@@ -144,8 +148,8 @@ class VerifierTest(unittest.TestCase):
         self.assertIn("You are an Android subtask verifier", messages[0]["content"])
         prompt_text = verifier.extract_user_text_prompt(messages)
         self.assertIn("Subtask:", prompt_text)
-        self.assertIn("Before observation:", prompt_text)
-        self.assertIn("Evidence observation:", prompt_text)
+        self.assertIn("Before observation summary:", prompt_text)
+        self.assertIn("Evidence observation summary:", prompt_text)
         self.assertIn("Action history for this subtask:", prompt_text)
         self.assertNotIn("Current Subtask:", prompt_text)
 

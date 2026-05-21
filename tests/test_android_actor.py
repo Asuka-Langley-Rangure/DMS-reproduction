@@ -11,6 +11,7 @@ from dms_reproduction.agents.android_actor import (
     InputTextAction,
     ScrollAction,
     StatusAction,
+    _should_stop_for_external_verification,
     parse_actor_action,
 )
 
@@ -174,7 +175,7 @@ class ActorPromptTest(unittest.TestCase):
         user_prompt = extract_user_text(messages)
 
         self.assertIn("You are an Android Actor", system_prompt)
-        self.assertIn("You are not responsible for re-planning", system_prompt)
+        self.assertIn("Do not re-plan the overall task.", system_prompt)
         self.assertIn("Current subtask:", user_prompt)
         self.assertIn("Current device state", user_prompt)
         self.assertIn("Foreground package", user_prompt)
@@ -190,6 +191,8 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Do not copy or invent numbers from the screenshot", user_prompt)
         self.assertIn("Do not output action_type swipe; use scroll instead", user_prompt)
         self.assertIn("Return exactly one action in the required JSON action format", user_prompt)
+        self.assertEqual(system_prompt.count("Never output action_type 'type'. Use action_type 'input_text' for entering text."), 1)
+        self.assertEqual(system_prompt.count("Do not only click the field unless the Goal is only to focus/select the field."), 1)
         self.assertNotIn("Visible UI elements JSON", user_prompt)
 
     def test_prompt_includes_observation_warning(self) -> None:
@@ -232,10 +235,12 @@ class ActorPromptTest(unittest.TestCase):
         )
 
         user_prompt = extract_user_text(actor.build_messages(request))
+        system_prompt = actor.build_messages(request)[0]["content"]
         self.assertIn("Grouped form-fill constraints", user_prompt)
         self.assertIn("Only edit those required fields", user_prompt)
         self.assertIn("Do not click Save, Done, Apply, or Submit until every required field matches the expected value", user_prompt)
         self.assertIn("\"first_name\": 5", user_prompt)
+        self.assertIn("Never output action_type 'type'. Use action_type 'input_text' for entering text.", system_prompt)
 
     def test_generic_prompt_ignores_contact_form_specific_block(self) -> None:
         llm = FakeLLMClient(['Reason: fill a field.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
@@ -324,11 +329,68 @@ class ActorActionParsingTest(unittest.TestCase):
         action, normalized, normalization_applied, normalization_reason, _, _ = parse_actor_action(
             {"action_type": "type", "index": 4, "text": "Alice"},
             build_observation(),
+            subtask="Enter the first name 'Alice'.",
         )
         self.assertIsInstance(action, InputTextAction)
         self.assertTrue(normalization_applied)
         self.assertEqual(normalized, {"action_type": "input_text", "index": 4, "text": "Alice"})
         self.assertIn("Normalized action_type", normalization_reason or "")
+
+    def test_parse_type_without_index_recovers_to_unique_editable_input_text(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {"index": 4, "text": "First name", "is_clickable": True, "is_editable": True},
+        ]
+        observation["valid_ui_indices"] = [4]
+        action, normalized, normalization_applied, normalization_reason, _, _ = parse_actor_action(
+            {"action_type": "type", "text": "Ahmed"},
+            observation,
+            subtask="Enter the first name 'Ahmed' in the contact form.",
+        )
+        self.assertIsInstance(action, InputTextAction)
+        self.assertEqual(action.to_payload(), {"action_type": "input_text", "index": 4, "text": "Ahmed", "clear_text": True})
+        self.assertTrue(normalization_applied)
+        self.assertEqual(
+            normalized,
+            {"action_type": "input_text", "text": "Ahmed", "index": 4, "clear_text": True},
+        )
+        self.assertIn("Recovered input_text.index", normalization_reason or "")
+
+    def test_parse_input_text_without_index_recovers_from_recent_editable_index(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {"index": 4, "text": "First name", "is_clickable": True, "is_editable": True},
+            {"index": 6, "text": "Last name", "is_clickable": True, "is_editable": True},
+        ]
+        observation["valid_ui_indices"] = [4, 6]
+        action, normalized, normalization_applied, normalization_reason, _, _ = parse_actor_action(
+            {"action_type": "input_text", "text": "Ahmed"},
+            observation,
+            subtask="Enter the name 'Ahmed Lopez' in the contact form.",
+            recent_editable_index=4,
+        )
+        self.assertIsInstance(action, InputTextAction)
+        self.assertEqual(action.to_payload(), {"action_type": "input_text", "index": 4, "text": "Ahmed", "clear_text": True})
+        self.assertTrue(normalization_applied)
+        self.assertEqual(
+            normalized,
+            {"action_type": "input_text", "text": "Ahmed", "index": 4, "clear_text": True},
+        )
+        self.assertIn("recently focused editable field", normalization_reason or "")
+
+    def test_parse_type_without_index_does_not_recover_when_multiple_editable_targets_are_ambiguous(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {"index": 4, "text": "First name", "is_clickable": True, "is_editable": True},
+            {"index": 6, "text": "Last name", "is_clickable": True, "is_editable": True},
+        ]
+        observation["valid_ui_indices"] = [4, 6]
+        with self.assertRaisesRegex(ValueError, "input_text.index is required"):
+            parse_actor_action(
+                {"action_type": "type", "text": "Ahmed"},
+                observation,
+                subtask="Enter the name 'Ahmed Lopez' in the contact form.",
+            )
 
     def test_parse_valid_scroll_action_without_index(self) -> None:
         action, _, _, _, _, _ = parse_actor_action({"action_type": "scroll", "direction": "down"}, build_observation())
@@ -753,6 +815,32 @@ class ActorActionParsingTest(unittest.TestCase):
 
 
 class ActorExecutionTest(unittest.TestCase):
+    def test_click_on_editable_field_does_not_trigger_external_verification_stop(self) -> None:
+        before_observation = build_observation()
+        after_observation = build_observation(step_id=1, activity="activity-after-click")
+
+        reason = _should_stop_for_external_verification(
+            subtask="Precondition: The contact creation form is open. Goal: Enter the name 'Noa Zhang' in the contact form.",
+            action=ClickAction(index=4),
+            before_observation=before_observation,
+            after_observation=after_observation,
+        )
+
+        self.assertIsNone(reason)
+
+    def test_input_text_on_editable_field_still_triggers_external_verification_stop(self) -> None:
+        before_observation = build_observation()
+        after_observation = build_observation(step_id=1, activity="activity-after-input")
+
+        reason = _should_stop_for_external_verification(
+            subtask="Precondition: The contact creation form is open. Goal: Enter the name 'Noa Zhang' in the contact form.",
+            action=InputTextAction(index=4, text="Noa"),
+            before_observation=before_observation,
+            after_observation=after_observation,
+        )
+
+        self.assertIn("Form-editing action executed", reason or "")
+
     def test_high_impact_click_stopped_path_resamples_observation_before_return(self) -> None:
         llm = FakeLLMClient(
             ['Reason: tap create.\nAction: {"action_type":"click","index":3}']
@@ -786,6 +874,83 @@ class ActorExecutionTest(unittest.TestCase):
         self.assertTrue(extra_state.get("final_after_resample"))
         self.assertEqual(extra_state.get("observation_attempt"), 2)
 
+    def test_text_entry_subtask_clicks_editable_field_then_inputs_text_before_stop(self) -> None:
+        llm = FakeLLMClient(
+            [
+                'Reason: The First name field is visible and actionable.\nAction: {"action_type":"click","index":4}',
+                'Reason: Enter the requested first name.\nAction: {"action_type":"input_text","index":4,"text":"Noa"}',
+            ]
+        )
+        actor = AndroidActor(llm, ActorConfig(max_steps=2))
+        env = FakeEnv()
+        first_after_click = build_observation(step_id=1, activity="contact-editor-focused")
+        second_after_input = build_observation(step_id=2, activity="contact-editor-input")
+        third_resampled = build_observation(step_id=2, activity="contact-editor-input-stable")
+        adapter = SequencedObservationAdapter([first_after_click, second_after_input, third_resampled])
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(
+                subtask="Precondition: The contact creation form is open. Goal: Enter the name 'Noa Zhang' in the contact form.",
+                observation=build_observation(),
+            ),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(len(result.steps), 2)
+        self.assertEqual(result.steps[0].action.to_payload(), {"action_type": "click", "index": 4})
+        self.assertFalse(result.steps[0].done)
+        self.assertIsNone(result.steps[0].done_reason)
+        self.assertEqual(
+            result.steps[1].action.to_payload(),
+            {"action_type": "input_text", "index": 4, "text": "Noa"},
+        )
+        self.assertEqual(result.steps[1].done_reason, "heuristic_stop_for_external_verification")
+        self.assertEqual(result.steps[1].after_observation["current_activity"], "contact-editor-input-stable")
+        self.assertEqual(len(adapter.calls), 3)
+
+    def test_text_entry_subtask_recovers_type_without_index_from_recent_editable_click(self) -> None:
+        llm = FakeLLMClient(
+            [
+                'Reason: The First name field is visible and actionable.\nAction: {"action_type":"click","index":4}',
+                'Reason: Enter the requested first name.\nAction: {"action_type":"type","text":"Ahmed"}',
+            ]
+        )
+        actor = AndroidActor(llm, ActorConfig(max_steps=2))
+        env = FakeEnv()
+        first_after_click = build_observation(step_id=1, activity="contact-editor-focused")
+        first_after_click["ui_elements"] = [
+            {"index": 4, "text": "First name", "is_clickable": True, "is_editable": True},
+            {"index": 6, "text": "Last name", "is_clickable": True, "is_editable": True},
+        ]
+        first_after_click["valid_ui_indices"] = [4, 6]
+        second_after_input = build_observation(step_id=2, activity="contact-editor-input")
+        third_resampled = build_observation(step_id=2, activity="contact-editor-input-stable")
+        adapter = SequencedObservationAdapter([first_after_click, second_after_input, third_resampled])
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(
+                subtask="Precondition: The contact creation form is open. Goal: Enter the name 'Ahmed Lopez' in the contact form.",
+                observation=build_observation(),
+            ),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(len(result.steps), 2)
+        self.assertEqual(
+            result.steps[1].action.to_payload(),
+            {"action_type": "input_text", "index": 4, "text": "Ahmed", "clear_text": True},
+        )
+        self.assertTrue(result.steps[1].action_normalization_applied)
+        self.assertEqual(
+            result.steps[1].normalized_action,
+            {"action_type": "input_text", "text": "Ahmed", "index": 4, "clear_text": True},
+        )
+        self.assertIn("Recovered input_text.index", result.steps[1].normalization_reason or "")
+
     def test_status_complete_path_does_not_resample_observation(self) -> None:
         llm = FakeLLMClient(['Reason: done.\nAction: {"action_type":"status","goal_status":"complete","message":"ok"}'])
         actor = AndroidActor(llm)
@@ -798,7 +963,7 @@ class ActorExecutionTest(unittest.TestCase):
             adapter,
         )
 
-        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.status, "stopped")
         self.assertEqual(len(adapter.calls), 0)
 
     def test_direct_open_app_stopped_path_resamples_observation_before_return(self) -> None:
@@ -905,9 +1070,9 @@ class ActorExecutionTest(unittest.TestCase):
             adapter,
         )
 
-        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.status, "stopped")
         self.assertEqual(len(result.steps), 1)
-        self.assertIn("Toggle/control action executed", result.steps[0].summary)
+        self.assertIn("Meaningful control action executed", result.steps[0].summary)
         self.assertEqual(len(env.actions), 1)
 
     def test_step_verifier_success_stops_after_high_value_action(self) -> None:

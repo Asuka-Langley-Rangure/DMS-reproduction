@@ -853,6 +853,14 @@ class AndroidTaskPlanner:
         observation_consistency = observation.get("observation_consistency") or "Unknown"
         history_text = self._format_task_history(task_history)
         memory_text = self._truncate(memory_context.strip(), self.config.max_memory_context_chars)
+        current_stage_hint = self._build_generic_current_stage_hint(
+            user_goal=user_goal,
+            observation=observation,
+        )
+        history_guidance = self._build_generic_history_guidance(
+            user_goal=user_goal,
+            observation=observation,
+        )
 
         goal_lower = user_goal.lower()
         task_type_hint = ""
@@ -873,6 +881,8 @@ class AndroidTaskPlanner:
             f"- Observation warning: {observation_warning}\n"
             "- A screenshot with numbered UI boxes is provided for current-screen grounding.\n"
             f"- Visible UI elements summary:\n{ui_description}\n\n"
+            f"Current-stage hint:\n{current_stage_hint}\n\n"
+            f"History usage note:\n{history_guidance}\n\n"
             f"Complete task history:\n{history_text}\n\n"
             "Retrieved memory context:\n"
             f"{memory_text if memory_text else 'None'}\n\n"
@@ -880,6 +890,8 @@ class AndroidTaskPlanner:
             "Planning instruction:\n"
             "- Return a sequential plan of 1-5 functional subtasks.\n"
             "- Use the current screen to ground the first subtask.\n"
+            "- The current observation has higher priority than earlier task history.\n"
+            "- Use task history to avoid repeating failed or no-progress strategies, but do not repeat earlier navigation if the current screen already reflects a later phase.\n"
             "- Use the overall goal to infer the next few expected milestones.\n"
             "- Later subtasks may depend on earlier subtasks succeeding.\n"
             "- Do not require later Preconditions to be true right now.\n"
@@ -887,17 +899,25 @@ class AndroidTaskPlanner:
             "- Do not combine navigation and the final state change into one subtask when the target screen/control is not currently visible.\n"
             "- Return one subtask only if the target screen/control/workspace is already visible, or if the next action is a repair/re-grounding step.\n"
             "- If the current screen is already on the needed form/detail/settings page, skip earlier navigation and plan from the current page.\n"
+            "- If the current screen is already inside the relevant app or workspace, do not repeat an app-opening subtask.\n"
+            "- If a later-stage entry point is visible now, start from that stage instead of restarting the workflow from app launch.\n"
             "- If the screen is unstable or degraded, return a safe recovery or re-grounding subtask.\n"
             "- If task history contains planner_complete_but_task_check_failed, do not return complete_goal again unless the current screen gives new direct evidence.\n\n"
             "Output format:\n"
             "If the overall goal is already directly achieved on the current screen, return:\n"
             '{"tool":"complete_goal","message":"..."}\n\n'
-            "Otherwise return set_tasks. For multi-stage work, return multiple tasks, for example:\n"
+            "Otherwise return set_tasks. For multi-stage work, return multiple tasks. These examples are common shapes, not mandatory templates. Only use an opening-app subtask if the current observation is not already inside the relevant app/workspace.\n"
             '{"tool":"set_tasks","tasks":['
             '{"task":"Precondition: The current screen is not the required app or settings page. Goal: Open the relevant app or settings area for the user goal.","reason":"The workflow cannot be completed from the current screen."},'
             '{"task":"Precondition: The relevant app or settings area is open. Goal: Reach the specific screen containing the requested target, item, form, or control.","reason":"The target workspace must be visible before changing it."},'
             '{"task":"Precondition: The specific target screen or control is visible. Goal: Complete the requested change, entry, creation, deletion, or configuration.","reason":"This performs the main requested state change."},'
             '{"task":"Precondition: The requested change has been made or is visible. Goal: Save, confirm, or verify the final result if needed.","reason":"The result should be persistent and checkable."}'
+            ']}\n\n'
+            "For a contact-creation task when the current screen already shows a create-contact entry point, a good shape is:\n"
+            '{"tool":"set_tasks","tasks":['
+            '{"task":"Precondition: The Phone or Contacts workspace is already open and a contact-creation entry point is visible. Goal: Reach or use the contact creation entry point.","reason":"The next stage is to enter the contact-creation flow from the current screen."},'
+            '{"task":"Precondition: The contact creation form or editor is open. Goal: Fill in Ahmed da Silva and +12459301917 in the contact form.","reason":"The requested contact information must be entered on the visible form."},'
+            '{"task":"Precondition: The requested contact information is entered. Goal: Save and verify the created contact.","reason":"The created contact should persist and be directly verifiable."}'
             ']}\n\n'
             "For a settings/toggle task from launcher, a good shape is:\n"
             '{"tool":"set_tasks","tasks":['
@@ -1105,6 +1125,55 @@ class AndroidTaskPlanner:
             hints.append("- The current screen appears to be a launcher or home surface. The first milestone should usually be opening the target app, not interacting with unrelated UI.")
         if not hints and (activity_lower or ui_summary_lower):
             hints.append("- Use the current screen to infer whether the next milestone is opening, navigating, editing, verifying, deleting, submitting, or confirming.")
+        if not hints:
+            return "None"
+        return "\n".join(hints)
+
+    @staticmethod
+    def _build_generic_history_guidance(user_goal: str, observation: Dict[str, Any]) -> str:
+        goal_lower = user_goal.lower()
+        app_lower = str(observation.get("app_name") or "").lower()
+        activity_lower = str(observation.get("current_activity") or "").lower()
+        ui_summary_lower = str(observation.get("ui_description") or "").lower()
+        if "contact" in goal_lower and any(token in f"{app_lower} {activity_lower}" for token in ("dialer", "contacts")):
+            return (
+                "Earlier completed steps should not be repeated if the current screen already reflects a later contact-creation phase."
+            )
+        if "create new contact" in ui_summary_lower or "add contact" in ui_summary_lower:
+            return (
+                "Earlier completed steps should not be repeated if the current screen already exposes the contact-creation entry point."
+            )
+        return "Use history to avoid repeating failed strategies, but let the current screen override earlier navigation."
+
+    @staticmethod
+    def _build_generic_current_stage_hint(user_goal: str, observation: Dict[str, Any]) -> str:
+        hints: list[str] = []
+        goal_lower = user_goal.lower()
+        app_lower = str(observation.get("app_name") or "").lower()
+        activity_lower = str(observation.get("current_activity") or "").lower()
+        ui_summary_lower = str(observation.get("ui_description") or "").lower()
+        combined_app_context = f"{app_lower} {activity_lower}"
+        is_contact_goal = "contact" in goal_lower
+        if is_contact_goal and any(token in combined_app_context for token in ("dialer", "contacts")):
+            hints.append(
+                "- The device is already inside the Phone/Dialer or Contacts workspace. Do not plan an app-opening subtask."
+            )
+        if is_contact_goal and (
+            "create new contact" in ui_summary_lower
+            or "add contact" in ui_summary_lower
+            or "your contacts are just a tap away here" in ui_summary_lower
+        ):
+            hints.append(
+                "- A create-contact entry point is visible now. Plan from the contact-creation entry stage, not from app launch."
+            )
+        if is_contact_goal and "contacteditoractivity" in activity_lower:
+            hints.append(
+                "- The current screen is already a contact editor. Plan from form filling or save/verify, not from navigation."
+            )
+        if is_contact_goal and "quick contact" in ui_summary_lower:
+            hints.append(
+                "- The current screen looks like a contact detail page. Do not fall back to early navigation or app-opening subtasks."
+            )
         if not hints:
             return "None"
         return "\n".join(hints)

@@ -740,7 +740,7 @@ class JoplinApp(AppSetup):
         folder_mapping={},
         env=env,
     )
-    joplin_app_utils.clear_dbs(env)
+    # joplin_app_utils.clear_dbs(env)
 
 
 class RetroMusicApp(AppSetup):

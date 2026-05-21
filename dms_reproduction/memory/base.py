@@ -12,6 +12,7 @@ class MemoryEvent:
     status: str
     summary: str
     verifier_status: str
+    verifier_source: str
     verifier_reason: str
     memory_eligible: bool
     verifier_evidence_source: str

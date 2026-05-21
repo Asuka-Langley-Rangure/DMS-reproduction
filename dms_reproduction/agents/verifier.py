@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Literal, Optional, Protocol
 
 
 VerifierStatus = Literal["success", "failure", "uncertain"]
+VerifierSource = Literal["llm_verifier", "androidworld_evaluator", "heuristic"]
 EvidenceSource = Literal[
     "actor_completed_frame",
     "final_after_observation",
@@ -36,6 +37,7 @@ class VerifierRequest:
 @dataclass
 class VerifierResult:
     status: VerifierStatus
+    source: VerifierSource
     reason: str
     memory_eligible: bool
     raw_response: str
@@ -46,6 +48,7 @@ class VerifierResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status,
+            "source": self.source,
             "reason": self.reason,
             "memory_eligible": self.memory_eligible,
             "raw_response": self.raw_response,
@@ -101,6 +104,7 @@ class AndroidVerifier:
         if parsed is None:
             return VerifierResult(
                 status="uncertain",
+                source="llm_verifier",
                 reason="Verifier response could not be parsed as JSON.",
                 memory_eligible=False,
                 raw_response=raw_response,
@@ -119,6 +123,7 @@ class AndroidVerifier:
             memory_eligible = _derive_memory_eligible(parsed, status)
             return VerifierResult(
                 status=status,
+                source="llm_verifier",
                 reason=reason,
                 memory_eligible=memory_eligible,
                 raw_response=raw_response,
@@ -129,6 +134,7 @@ class AndroidVerifier:
         except ValueError as exc:
             return VerifierResult(
                 status="uncertain",
+                source="llm_verifier",
                 reason="Verifier response schema was invalid.",
                 memory_eligible=False,
                 raw_response=raw_response,
@@ -148,7 +154,9 @@ class AndroidVerifier:
             "- Treat evidence_observation as the main ground-truth evidence.\n"
             "- Treat action_history only as supporting evidence for or against what the screenshot shows.\n"
             "- Do not infer success from action history alone.\n"
-            "- If action history and screenshot conflict, prioritize the screenshot.\n\n"
+            "- If action history and screenshot conflict, prioritize the screenshot.\n"
+            "- For save/submit/create/confirm goals, leaving the editor/form page is not a failure by itself.\n"
+            "- If the final observation shows the created/saved item in a list, detail page, or search result, mark success.\n\n"
             "Output policy:\n"
             '- Return {"status":"success",...} only if the evidence_observation directly supports that the subtask goal is achieved.\n'
             '- Return {"status":"failure",...} if the evidence_observation directly contradicts the goal, or the action history clearly shows the subtask went off target.\n'
@@ -196,7 +204,8 @@ class AndroidVerifier:
     def _build_user_prompt(self, request: VerifierRequest) -> str:
         evidence_observation = request.evidence_observation or {}
         return (
-            f"Subtask:\n{request.subtask}\n\n""Critical verification rules:\n"
+            f"Subtask:\n{request.subtask}\n\n"
+            "Critical verification rules:\n"
             "- Verify ONLY whether the Goal of the subtask is achieved.\n"
             "- Do NOT mark success merely because the Precondition is true.\n"
             "- Do NOT weaken or rewrite the Goal using the actor's reason.\n"
@@ -204,7 +213,22 @@ class AndroidVerifier:
             "- A visible launcher icon or actionable app shortcut is not enough.\n" 
             "- If before_observation and evidence_observation show the same app, activity, and UI, then a navigation/open/reach/toggle goal is NOT successful unless the Goal was already satisfied before.\n"
             "- Actor history is supporting evidence only. The final evidence_observation is the ground truth.\n"
+            "- If the foreground package is an input method such as com.google.android.inputmethod.latin, do not treat it as leaving the target app.\n"
+            "- When a soft keyboard is active, use current_activity and underlying editor UI labels to determine whether the form is still open.\n"
+            "- For contact editor tasks, ContactEditorActivity with keyboard active is still a valid contact editor state.\n"
             "- Return success only when the evidence directly supports the Goal state.\n\n"
+
+            "App equivalence rules:\n"
+            "- Android app display names, package names, and activity names may differ.\n"
+            "- Do not require the package or activity to literally contain the user's app name.\n"
+            "- Treat semantically equivalent app names/packages/activities as the same app when verifying app-opening subtasks.\n"
+            "- Examples of equivalent app evidence:\n"
+            "  * Phone app == Dialer == com.google.android.dialer == DialtactsActivity.\n"
+            "  * Contacts app == com.google.android.contacts == ContactEditorActivity or contacts-related activities.\n"
+            "  * Settings app == Android Settings == com.android.settings.\n"
+            "  * Files app == com.google.android.documentsui or Android file picker/documents UI when the goal is file management.\n"
+            "- For an app-opening goal, success requires the equivalent target app to be in the foreground.\n"
+            "- A visible launcher icon or app shortcut is not enough; the app must be actually opened.\n"
             f"Evidence source: {request.evidence_source}\n\n"
             "Before observation summary:\n"
             f"{self._format_observation_compact(request.before_observation)}\n\n"

@@ -342,6 +342,7 @@ class AndroidActor:
         history = list(request.action_history)
         steps: list[ActorStepResult] = []
         answer_text = ""
+        recent_editable_index: int | None = None
         direct_open_action = self._maybe_plan_direct_open_app_action(request.subtask, current_observation)
 
         if direct_open_action is not None:
@@ -490,6 +491,7 @@ class AndroidActor:
                     current_observation,
                     reason=reason,
                     subtask=request.subtask,
+                    recent_editable_index=recent_editable_index,
                 )
             except ValueError as exc:
                 step = ActorStepResult(
@@ -544,6 +546,10 @@ class AndroidActor:
             else:
                 if isinstance(action, AnswerAction):
                     answer_text = action.text
+                if action.action_type in {"click", "long_press"}:
+                    action_target = _resolve_action_target_element(action, step_request.observation)
+                    if action_target is not None and bool(action_target.get("is_editable")) and action_target.get("index") is not None:
+                        recent_editable_index = int(action_target["index"])
                 try:
                     env.execute_action(to_json_action(action))
                     after_observation = observation_adapter.capture_observation(
@@ -697,6 +703,10 @@ class AndroidActor:
             "- Use wait only after an action was just executed and the screen may still be loading. Do not use wait as the first action on a stable launcher/home screen.\n"
             "- If the subtask precondition is clearly unmet and cannot be repaired by one valid action, return status infeasible.\n"
             "- Return status complete only when the current subtask Goal is already satisfied in the current observation.\n\n"
+            "- Never output action_type 'type'. Use action_type 'input_text' for entering text.\n"
+            "- If the Goal says enter/type/fill text into a visible editable field, use input_text directly.\n"
+            "- Do not only click the field unless the Goal is only to focus/select the field.\n"
+            "- If the name has first and last parts and separate First name / Last name fields are visible, fill the corresponding field value.\n"
 
             "GUI grounding rules:\n"
             "- Prefer exact indexed UI actions when the target is visible and actionable.\n"
@@ -744,7 +754,10 @@ class AndroidActor:
             "- Example: opening the Phone app is not the same as reaching the Contacts tab.\n"
             "- Before choosing an index, verify the exact numbered UI element and its properties.\n"
             "- If you mention a specific target like Phone or Contacts, the action index must match that exact visible element.\n"
-            "- For text entry, use action_type input_text, not type, enter_text, fill_text, or set_text.\n"
+            "- Never output action_type 'type'. Use action_type 'input_text' for entering text.\n"
+            "- If the goal says enter/type/fill text into a visible field, use input_text directly.\n"
+            "- Do not only click the field unless the goal is only to focus/select the field.\n"
+            "- If the name is split across First name and Last name fields, enter the corresponding part into the corresponding field.\n"
             "- If the subtask asks you to fill a coherent form section, fill only the required related fields for that subtask and stop once those fields are complete.\n"
             "- If the current path is not feasible, end explicitly with infeasible.\n"
             "- If the observation is unstable, degraded, or only shows system UI, prefer wait or navigate_back over guessing.\n"
@@ -1064,6 +1077,7 @@ def parse_actor_action(
     *,
     reason: str = "",
     subtask: str = "",
+    recent_editable_index: int | None = None,
 ) -> tuple[ActorAction, Dict[str, Any] | None, bool, str | None, Dict[str, Any] | None, str | None]:
     normalized_payload, normalization_applied, normalization_reason = normalize_actor_action_payload(payload)
     action_type = str(normalized_payload.get("action_type", "")).strip()
@@ -1156,6 +1170,22 @@ def parse_actor_action(
         clear_text = normalized_payload.get("clear_text")
         if clear_text is not None:
             clear_text = bool(clear_text)
+        recovered_payload, recovery_reason = _maybe_autofill_input_text_payload(
+            normalized_payload,
+            observation=observation,
+            subtask=subtask,
+            recent_editable_index=recent_editable_index,
+        )
+        if recovered_payload is not None:
+            normalized_payload = recovered_payload
+            if clear_text is None:
+                clear_text = True
+            if normalization_applied:
+                if normalization_reason and recovery_reason:
+                    normalization_reason = f"{normalization_reason} {recovery_reason}"
+            else:
+                normalization_applied = True
+                normalization_reason = recovery_reason
         corrected, correction_reason = _maybe_correct_pointing_payload(
             normalized_payload,
             observation=observation,
@@ -1258,6 +1288,60 @@ def normalize_actor_action_payload(payload: dict[str, Any]) -> tuple[dict[str, A
         return normalized, False, None
     normalized["action_type"] = canonical_action
     return normalized, True, f"Normalized action_type from {action_type!r} to {canonical_action!r}."
+
+
+def _maybe_autofill_input_text_payload(
+    payload: dict[str, Any],
+    *,
+    observation: Dict[str, Any],
+    subtask: str,
+    recent_editable_index: int | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if str(payload.get("action_type", "")).strip() != "input_text":
+        return None, None
+    if "index" in payload and payload.get("index") is not None:
+        return None, None
+    text = str(payload.get("text", "")).strip()
+    if not text or not _subtask_is_text_entry(subtask):
+        return None, None
+
+    ui_elements = observation.get("ui_elements") or []
+    editable_elements = [element for element in ui_elements if bool(element.get("is_editable")) and element.get("index") is not None]
+    if not editable_elements:
+        return None, None
+
+    focused_editable = [
+        element
+        for element in editable_elements
+        if bool((element.get("raw") or {}).get("is_focused")) or bool(element.get("is_focused"))
+    ]
+    resolved_index: int | None = None
+    recovery_basis: str | None = None
+    if len(focused_editable) == 1:
+        resolved_index = int(focused_editable[0]["index"])
+        recovery_basis = "unique focused editable field"
+    elif recent_editable_index is not None and any(int(element["index"]) == recent_editable_index for element in editable_elements):
+        resolved_index = int(recent_editable_index)
+        recovery_basis = "recently focused editable field"
+    elif len(editable_elements) == 1:
+        resolved_index = int(editable_elements[0]["index"])
+        recovery_basis = "unique visible editable field"
+
+    if resolved_index is None:
+        return None, None
+
+    recovered = dict(payload)
+    recovered["index"] = resolved_index
+    recovered["clear_text"] = bool(payload.get("clear_text")) if "clear_text" in payload else True
+    return recovered, (
+        "Recovered input_text.index from the current observation using the "
+        f"{recovery_basis} and defaulted clear_text=true."
+    )
+
+
+def _subtask_is_text_entry(subtask: str) -> bool:
+    goal_text = _extract_subtask_goal(subtask).lower()
+    return any(marker in goal_text for marker in ("enter", "type", "fill", "input"))
 
 
 def _validate_index(
@@ -1642,6 +1726,8 @@ def _should_stop_for_external_verification(
     if action.action_type in {"input_text", "keyboard_enter"}:
         return "Form-editing action executed; stop and let the external verifier inspect the updated field state."
     if action.action_type in {"click", "long_press"}:
+        if target is not None and bool(target.get("is_editable")):
+            return None
         return "High-impact pointing action executed; stop and let the external verifier inspect the resulting screen."
     return None
 

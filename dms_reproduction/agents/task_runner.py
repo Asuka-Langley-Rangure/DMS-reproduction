@@ -297,6 +297,35 @@ class AndroidTaskRunner:
                     observation=observation,
                 )
                 continue
+            planner_grounding_check = self._validate_planner_output_against_observation(
+                planner_result=planner_result,
+                observation=observation,
+                normalized_subtasks=normalized_subtasks,
+            )
+            round_record.planner_grounding_check = planner_grounding_check
+            planner_grounding_error = next(
+                (item for item in planner_grounding_check if not bool(item.get("valid", True))),
+                None,
+            )
+            if planner_grounding_error is not None:
+                round_record.replan_reason = str(
+                    planner_grounding_error.get("reason_code")
+                    or "planner_subtask_conflicts_with_current_observation"
+                )
+                failure_pattern_counts["planner_subtask_invalid"] += 1
+                reason_text = str(
+                    planner_grounding_error.get("message")
+                    or "Planner subtasks conflict with the current observation."
+                )
+                self._append_planner_feedback_history(
+                    task_history=task_history,
+                    round_id=round_id,
+                    status="planner_subtask_invalid",
+                    reason=reason_text,
+                    summary=reason_text,
+                    observation=observation,
+                )
+                continue
 
             round_all_subtasks_succeeded = True
             for subtask in normalized_subtasks:
@@ -374,22 +403,33 @@ class AndroidTaskRunner:
                     "verification_target_visible": False,
                     "terminal_failure_reason": None,
                 }
-                verifier_result, verifier_evidence_source = self._run_subtask_verification(
-                    subtask=subtask,
-                    actor_result=actor_result,
-                    before_observation=before_subtask_observation,
-                    current_observation=observation,
-                    memory_context=actor_memory_context,
-                    success_check=success_check,
-                )
-                success_check["verifier_status"] = verifier_result.status
-                success_check["verifier_reason"] = verifier_result.reason
-                success_check["memory_eligible"] = verifier_result.memory_eligible
-                success_check["verifier_evidence_source"] = verifier_evidence_source
                 if retry_reason == "recoverable_schema_error":
                     failure_pattern_counts["recoverable_schema_error"] += 1
                 total_actor_steps += len(actor_result.steps)
                 observation = actor_result.final_observation or observation
+                evaluator_success = self._task_success_if_available(task, env)
+                if evaluator_success:
+                    _, verifier_evidence_source = self._select_verifier_evidence_observation(
+                        actor_result,
+                        observation,
+                    )
+                    verifier_result = self._build_evaluator_success_result(actor_result)
+                    success_check["global_task_success"] = True
+                    success_check["global_task_success_source"] = "androidworld_evaluator_after_subtask"
+                else:
+                    verifier_result, verifier_evidence_source = self._run_subtask_verification(
+                        subtask=subtask,
+                        actor_result=actor_result,
+                        before_observation=before_subtask_observation,
+                        current_observation=observation,
+                        memory_context=actor_memory_context,
+                        success_check=success_check,
+                    )
+                success_check["verifier_status"] = verifier_result.status
+                success_check["verifier_reason"] = verifier_result.reason
+                success_check["memory_eligible"] = verifier_result.memory_eligible
+                success_check["verifier_evidence_source"] = verifier_evidence_source
+                success_check["verifier_source"] = verifier_result.source
                 subtask_completed = verifier_result.status == "success"
                 if subtask_completed:
                     actor_result.status = "completed"
@@ -419,6 +459,21 @@ class AndroidTaskRunner:
                     observation=observation,
                     memory_read_result=memory_read_result,
                 )
+                if evaluator_success and self.config.stop_on_goal_complete:
+                    result = TaskRunResult(
+                        status="completed",
+                        planner_rounds=planner_rounds,
+                        final_observation=observation,
+                        final_task_success=True,
+                        total_actor_steps=total_actor_steps,
+                        completion_message=(
+                            actor_result.completion_message
+                            or verifier_result.reason
+                            or "AndroidWorld evaluator passed after subtask execution."
+                        ),
+                    )
+                    self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
+                    return result
                 if subtask_completed and self.config.stop_on_goal_complete and self._task_success_if_available(task, env):
                     result = TaskRunResult(
                         status="completed",
@@ -598,6 +653,7 @@ class AndroidTaskRunner:
             return (
                 VerifierResult(
                     status=status,
+                    source="heuristic",
                     reason=reason,
                     memory_eligible=(status == "success"),
                     raw_response="",
@@ -614,6 +670,28 @@ class AndroidTaskRunner:
             memory_context=memory_context,
         )
         return self.verifier.run_verification(verifier_request), evidence_source
+
+    @staticmethod
+    def _build_evaluator_success_result(actor_result: ActorRunResult) -> VerifierResult:
+        return VerifierResult(
+            status="success",
+            source="androidworld_evaluator",
+            reason=(
+                actor_result.completion_message
+                or "AndroidWorld evaluator passed after subtask execution."
+            ),
+            memory_eligible=AndroidTaskRunner._is_evaluator_memory_eligible(actor_result),
+            raw_response="",
+            parse_error=None,
+            prompt_text="",
+            messages=[],
+        )
+
+    @staticmethod
+    def _is_evaluator_memory_eligible(actor_result: ActorRunResult) -> bool:
+        if len(actor_result.steps) <= 1:
+            return False
+        return not any(step.parse_error or step.execution_error for step in actor_result.steps)
 
     def _build_step_verifier_callback(
         self,
@@ -1226,6 +1304,62 @@ class AndroidTaskRunner:
         return normalized, None
 
     @staticmethod
+    def _validate_planner_output_against_observation(
+        *,
+        planner_result: PlannerResult,
+        observation: dict[str, Any],
+        normalized_subtasks: list[PlannerSubtask],
+    ) -> list[dict[str, Any]]:
+        if not normalized_subtasks:
+            return []
+        first_subtask = normalized_subtasks[0]
+        precondition = str(first_subtask.precondition or "").strip().lower()
+        goal = str(first_subtask.goal or "").strip().lower()
+        app_name = str(observation.get("app_name") or "").strip().lower()
+        activity = str(observation.get("current_activity") or "").strip().lower()
+        ui_description = str(observation.get("ui_description") or "").strip().lower()
+        combined_context = f"{app_name} {activity} {ui_description}"
+        inside_dialer_contacts_workspace = any(token in combined_context for token in ("dialer", "contacts"))
+        create_contact_entry_visible = any(
+            token in ui_description
+            for token in ("create new contact", "add contact", "your contacts are just a tap away here")
+        )
+        contact_editor_visible = "contacteditoractivity" in activity
+        contact_detail_visible = "quick contact" in ui_description or "contact detail" in ui_description
+        if not (
+            inside_dialer_contacts_workspace
+            or create_contact_entry_visible
+            or contact_editor_visible
+            or contact_detail_visible
+        ):
+            return [{"valid": True, "reason_code": None, "message": "No observation conflict detected."}]
+
+        opens_phone_like_app = bool(
+            re.search(r"\bopen\b.*\b(phone|dialer|contacts)\b", goal)
+            or re.search(r"\blaunch\b.*\b(phone|dialer|contacts)\b", goal)
+            or "open the relevant app" in goal
+            or "open the relevant app or settings area" in goal
+        )
+        earlier_navigation_precondition = any(
+            token in precondition
+            for token in ("home screen", "launcher", "not the required app", "non-settings screen", "not in the app")
+        )
+        if opens_phone_like_app and (earlier_navigation_precondition or inside_dialer_contacts_workspace):
+            return [
+                {
+                    "valid": False,
+                    "reason_code": "planner_subtask_conflicts_with_current_observation",
+                    "message": (
+                        "Planner first subtask repeats an app-opening phase even though the current observation "
+                        "already shows a later Phone/Dialer or Contacts workspace."
+                    ),
+                    "subtask": first_subtask.to_dict(),
+                    "planner_current_stage_id": planner_result.current_stage_id,
+                }
+            ]
+        return [{"valid": True, "reason_code": None, "message": "No observation conflict detected."}]
+
+    @staticmethod
     def _validate_stage_subtask_alignment(
         subtasks: list[PlannerSubtask],
         *,
@@ -1413,6 +1547,7 @@ class AndroidTaskRunner:
                 "status": result.status,
                 "summary": result.completion_message,
                 "verifier_status": "",
+                "verifier_source": "",
                 "verifier_reason": "",
                 "memory_eligible": False,
                 "verifier_evidence_source": "",
@@ -1447,6 +1582,7 @@ class AndroidTaskRunner:
             status=actor_result.status,
             summary=str(summary),
             verifier_status=verifier_result.status,
+            verifier_source=verifier_result.source,
             verifier_reason=verifier_result.reason,
             memory_eligible=verifier_result.memory_eligible,
             verifier_evidence_source=verifier_evidence_source,
@@ -1476,7 +1612,7 @@ class AndroidTaskRunner:
             execution_error_count=feedback_counts["execution_error_count"],
         )
         self.memory_provider.record(event.to_dict())
-        if verifier_result.status != "success":
+        if verifier_result.status != "success" or not verifier_result.memory_eligible:
             return
         if any(step.parse_error or step.execution_error for step in actor_result.steps):
             return
@@ -1644,6 +1780,11 @@ class AndroidTaskRunner:
             return (
                 f"Round limit reached after {len(planner_rounds)} planner rounds; "
                 "planner repeatedly referenced UI targets that were absent from the current observation."
+            )
+        if last_reason == "planner_subtask_conflicts_with_current_observation":
+            return (
+                f"Round limit reached after {len(planner_rounds)} planner rounds; "
+                "planner repeatedly proposed an earlier app-opening subtask that conflicted with the current observation."
             )
         if last_reason == "observation_unstable_persisted":
             return (
