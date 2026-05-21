@@ -348,7 +348,77 @@ class DMSPruner:
                 )
 
         return None
+
+    def _select_capacity_pruning_decisions(
+        self,
+        remaining_records: List[DMSMemoryRecord],
+        active_count_after_hard: int,
+    ) -> List[PruningDecision]:
+        """
+        Select capacity-based pruning candidates from the remaining records.
+
+        This is the single entry point for the capacity pruning stage after
+        hard-rule and threshold pruning have already been applied.
+        """
+        min_prune_count = active_count_after_hard - self.config.capacity_min
+        if min_prune_count <= 0:
+            return []
+
+        if not remaining_records:
+            return []
+
+        if (
+            self.config.use_elbow
+            and len(remaining_records) >= self.config.elbow_min_records
+        ):
+            decisions = self._select_by_elbow(
+                records=remaining_records,
+                min_prune_count=min_prune_count,
+            )
+        else:
+            decisions = self._select_by_bottom_ratio(
+                records=remaining_records,
+                min_prune_count=min_prune_count,
+            )
+
+        max_count = min(len(remaining_records), max(min_prune_count, 0))
+        if max_count <= 0:
+            return []
+
+        return decisions[:max_count]
     
+
+    # def _select_capacity_pruning_decisions(
+    #     self,
+    #     remaining_records: List[DMSMemoryRecord],
+    #     active_count_after_hard: int,
+    # ) -> List[PruningDecision]:
+    #     """
+    #     Select low-value memories when capacity is exceeded.
+
+    #     If use_elbow is enabled and there are enough records, use an
+    #     elbow-like cutoff. Otherwise prune the bottom ratio.
+    #     """
+    #     if not remaining_records:
+    #         return []
+
+    #     must_reduce = max(0, active_count_after_hard - self.config.capacity_min)
+    #     if must_reduce <= 0:
+    #         return []
+
+    #     if (
+    #         self.config.use_elbow
+    #         and len(remaining_records) >= self.config.elbow_min_records
+    #     ):
+    #         return self._select_by_elbow(
+    #             records=remaining_records,
+    #             min_prune_count=must_reduce,
+    #         )
+
+    #     return self._select_by_bottom_ratio(
+    #         records=remaining_records,
+    #         min_prune_count=must_reduce,
+    #     )
     def _select_by_bottom_ratio(
         self,
         records: List[DMSMemoryRecord],

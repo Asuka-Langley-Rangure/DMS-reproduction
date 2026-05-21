@@ -55,6 +55,7 @@ class DMSMemoryConfig:
     enable_risk_filter: bool = True
     risk_threshold: float = 0.70
     risky_memory_top_k_for_planner: int = 5
+    enable_planner_risk_context: bool = False
 
     # logical time
     increment_step_on_record: bool = True
@@ -134,6 +135,8 @@ class DMSMemoryProvider(MemoryProvider):
         We do not inject successful trajectories into planner.
         We only provide risk feedback to prevent repeated bad subtask plans.
         """
+        if not self.config.enable_planner_risk_context:
+            return ""
         risky_records = self._get_risky_records()
         return self.formatter.format_planner_risk_context(
             risky_records,

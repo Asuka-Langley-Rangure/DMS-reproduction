@@ -41,6 +41,22 @@ class RunTaskLoopBatchTest(unittest.TestCase):
         self.assertEqual(command[-1], "--skip_emulator_launch")
         self.assertNotIn("-- --skip_emulator_launch", " ".join(command))
 
+    def test_build_command_preserves_custom_output_dir_passthrough(self) -> None:
+        args = Namespace(
+            task="ContactsAddContact",
+            runs=1,
+            memory_backend="static",
+            python_executable="python",
+            task_loop_args=["--output_dir", "custom_runs"],
+        )
+
+        command = build_command(args)
+
+        self.assertIn("--output_dir", command)
+        self.assertIn("custom_runs", command)
+        self.assertIn("--memory_backend", command)
+        self.assertIn("static", command)
+
 
 if __name__ == "__main__":
     unittest.main()

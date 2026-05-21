@@ -42,13 +42,17 @@ from scripts.planner_smoke import (
     patch_a11y_forwarder_apk,
 )
 
+DEFAULT_OUTPUT_DIR = "task_loop_smoke_runs"
+DEFAULT_STATIC_MEMORY_PATH = "memory_bank/static_memory.jsonl"
+DEFAULT_DMS_MEMORY_ROOT = "memory_bank/dms_memory"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a planner + actor closed-loop smoke test on AndroidWorld."
     )
     parser.add_argument("--task", default="ContactsAddContact")
-    parser.add_argument("--output_dir", default="task_loop_smoke_runs")
+    parser.add_argument("--output_dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--base_url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api_key", default="dms-qwen-secret")
     parser.add_argument("--model", default="qwen2.5-vl-7b")
@@ -102,7 +106,7 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "static", "dms"],
     )
     parser.add_argument("--use_static_memory", action="store_true")
-    parser.add_argument("--static_memory_path", default="memory_bank/static_memory.jsonl")
+    parser.add_argument("--static_memory_path", default=DEFAULT_STATIC_MEMORY_PATH)
     parser.add_argument("--static_memory_top_k", type=int, default=3)
     parser.add_argument(
         "--static_memory_retrieval_mode",
@@ -113,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding_api_key", default="EMPTY")
     parser.add_argument("--embedding_model", default="bge-small-en-v1.5")
     parser.add_argument("--embedding_timeout", type=int, default=120)
-    parser.add_argument("--dms_memory_root", default="memory_bank/dms_memory")
+    parser.add_argument("--dms_memory_root", default=DEFAULT_DMS_MEMORY_ROOT)
     parser.add_argument(
         "--dms_retrieval_mode",
         default="lexical_jaccard",
@@ -126,6 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dms_replace_only_if_shorter", action="store_true", default=True)
     parser.add_argument("--dms_enable_risk_filter", action="store_true", default=True)
     parser.add_argument("--dms_risk_threshold", type=float, default=0.70)
+    parser.add_argument("--dms_enable_planner_risk_context", action="store_true")
     return parser.parse_args()
 
 
@@ -134,6 +139,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.use_static_memory and backend == "none":
         backend = "static"
     args.memory_backend = backend
+    _normalize_backend_aware_paths(args)
     if (
         backend == "static"
         and args.static_memory_retrieval_mode != "lexical_jaccard"
@@ -162,9 +168,19 @@ def validate_args(args: argparse.Namespace) -> None:
             )
 
 
-def make_run_dir(output_dir: str, task: str) -> Path:
+def _normalize_backend_aware_paths(args: argparse.Namespace) -> None:
+    backend = str(args.memory_backend or "none")
+    if str(args.static_memory_path or "") == DEFAULT_STATIC_MEMORY_PATH:
+        args.static_memory_path = str(
+            Path("memory_bank") / "static" / backend / "static_memory.jsonl"
+        )
+    if str(args.dms_memory_root or "") == DEFAULT_DMS_MEMORY_ROOT:
+        args.dms_memory_root = str(Path("memory_bank") / "dms" / backend)
+
+
+def make_run_dir(output_dir: str, task: str, memory_backend: str) -> Path:
     run_name = f"{task}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    run_dir = Path(output_dir) / run_name
+    run_dir = Path(output_dir) / memory_backend / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -457,7 +473,7 @@ def build_round_subtask_outcome_lines(subtask_runs: list[dict[str, Any]]) -> lis
     return lines
 
 
-def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
+def build_run_summary(task: str, goal: str, run_result: dict[str, Any], memory_backend: str) -> str:
     failure_counts = {
         "invalid_index": 0,
         "unstable_observation": 0,
@@ -509,6 +525,7 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
         "",
         f"- Task: {task}",
         f"- Goal: {goal}",
+        f"- Memory backend: {memory_backend}",
         f"- Status: {run_result.get('status')}",
         f"- Completion message: {run_result.get('completion_message') or 'None'}",
         f"- Planner rounds: {len(run_result.get('planner_rounds', []))}",
@@ -577,7 +594,11 @@ def build_meta(run_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
         "base_url": args.base_url,
         "console_port": args.console_port,
         "grpc_port": args.grpc_port,
+        "memory_backend": args.memory_backend,
         "output_dir": str(run_dir),
+        "static_memory_path": args.static_memory_path,
+        "dms_memory_root": args.dms_memory_root,
+        "dms_enable_planner_risk_context": args.dms_enable_planner_risk_context,
         "timestamp": datetime.now().isoformat(),
         "planner_call_seconds_total": None,
         "max_planner_rounds": args.max_planner_rounds,
@@ -746,7 +767,7 @@ def write_initial_stage_plan_artifacts(run_dir: Path, initial_stage_plan_record:
 
 def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     validate_args(args)
-    run_dir = make_run_dir(args.output_dir, args.task)
+    run_dir = make_run_dir(args.output_dir, args.task, args.memory_backend)
     meta = build_meta(run_dir, args)
     tunnel_process = None
     env = None
@@ -831,6 +852,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
                     replace_only_if_shorter=args.dms_replace_only_if_shorter,
                     enable_risk_filter=args.dms_enable_risk_filter,
                     risk_threshold=args.dms_risk_threshold,
+                    enable_planner_risk_context=args.dms_enable_planner_risk_context,
                 ),
                 retriever_config=RetrievalConfig(
                     top_k=args.dms_retrieval_top_k,
@@ -881,11 +903,15 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             artifact_index["rounds"].append(write_round_artifacts(run_dir, round_record))
         save_json(run_dir / "artifact_index.json", artifact_index)
         save_json(run_dir / "run_result.json", build_light_run_result(run_result_dict, artifact_index))
-        save_text(run_dir / "run_summary.md", build_run_summary(args.task, goal, run_result_dict))
+        save_text(
+            run_dir / "run_summary.md",
+            build_run_summary(args.task, goal, run_result_dict, args.memory_backend),
+        )
         save_json(run_dir / "meta.json", meta)
 
         print(f"Task: {args.task}")
         print(f"Goal: {goal}")
+        print(f"Memory backend: {args.memory_backend}")
         print(f"Status: {run_result.status}")
         print(f"Planner rounds: {len(run_result.planner_rounds)}")
         print(f"Total actor steps: {run_result.total_actor_steps}")
