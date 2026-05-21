@@ -549,4 +549,8 @@ ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -N -L 8000:127.0.0.1:8007
 curl.exe http://127.0.0.1:8000/v1/models -H "Authorization: Bearer dms-qwen-secret"
 ```
 
+#### 目前主要测试脚本
+```
+python scripts\run_task_loop_batch.py --task SystemWifiTurnOff --runs 5 --memory_backend none -- --skip_emulator_launch
+```
 

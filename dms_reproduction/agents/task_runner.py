@@ -423,8 +423,6 @@ class AndroidTaskRunner:
                     result = TaskRunResult(
                         status="completed",
                         planner_rounds=planner_rounds,
-                        initial_stage_plan=initial_stage_plan_record.to_dict(),
-                        stage_plan_revisions=[record.to_dict() for record in stage_plan_revisions],
                         final_observation=observation,
                         final_task_success=True,
                         total_actor_steps=total_actor_steps,

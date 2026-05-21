@@ -160,15 +160,56 @@ class AndroidVerifier:
             '- "memory_eligible": boolean\n'
         )
 
+    def _format_observation_compact(self, observation: Dict[str, Any]) -> str:
+        if not observation:
+            return "None"
+
+        labels = []
+        for element in observation.get("ui_elements") or []:
+            label = (
+                element.get("text")
+                or element.get("content_description")
+                or element.get("resource_name")
+                or ""
+            )
+            label = str(label).strip()
+            if label:
+                labels.append(label)
+
+        unique_labels = []
+        seen = set()
+        for label in labels:
+            key = label.lower()
+            if key not in seen:
+                unique_labels.append(label)
+                seen.add(key)
+
+        return (
+            f"- Foreground package: {observation.get('foreground_package') or 'Unknown'}\n"
+            f"- App name: {observation.get('app_name') or 'Unknown'}\n"
+            f"- Current activity: {observation.get('current_activity') or 'Unknown'}\n"
+            f"- Observation consistency: {observation.get('observation_consistency') or 'Unknown'}\n"
+            f"- Observation warning: {observation.get('observation_warning') or 'None'}\n"
+            f"- Visible labels excerpt: {', '.join(unique_labels[:40]) or 'None'}"
+        )
+
     def _build_user_prompt(self, request: VerifierRequest) -> str:
         evidence_observation = request.evidence_observation or {}
         return (
-            f"Subtask:\n{request.subtask}\n\n"
+            f"Subtask:\n{request.subtask}\n\n""Critical verification rules:\n"
+            "- Verify ONLY whether the Goal of the subtask is achieved.\n"
+            "- Do NOT mark success merely because the Precondition is true.\n"
+            "- Do NOT weaken or rewrite the Goal using the actor's reason.\n"
+            "- If the Goal is to open an app, success requires the target app to be in foreground.\n"
+            "- A visible launcher icon or actionable app shortcut is not enough.\n" 
+            "- If before_observation and evidence_observation show the same app, activity, and UI, then a navigation/open/reach/toggle goal is NOT successful unless the Goal was already satisfied before.\n"
+            "- Actor history is supporting evidence only. The final evidence_observation is the ground truth.\n"
+            "- Return success only when the evidence directly supports the Goal state.\n\n"
             f"Evidence source: {request.evidence_source}\n\n"
-            "Before observation:\n"
-            f"{self._format_observation(request.before_observation)}\n\n"
-            "Evidence observation:\n"
-            f"{self._format_observation(evidence_observation)}\n\n"
+            "Before observation summary:\n"
+            f"{self._format_observation_compact(request.before_observation)}\n\n"
+            "Evidence observation summary:\n"
+            f"{self._format_observation_compact(evidence_observation)}\n\n"
             "Action history for this subtask:\n"
             f"{self._format_history(request.action_history)}\n\n"
             "Retrieved memory context:\n"
@@ -322,6 +363,11 @@ class AndroidVerifier:
                 "failure",
                 "The control was acted on, but the final observation does not show reliable evidence that the requested control state actually changed.",
             )
+        if status == "success" and _should_veto_no_progress_success(request, evidence_observation):
+            return (
+                "failure",
+                "The evidence observation is unchanged from before, and the subtask Goal state was not achieved.",
+            )
         return status, reason
 
 
@@ -463,6 +509,25 @@ def _should_veto_toggle_success(request: VerifierRequest, evidence_observation: 
     if _has_toggle_state_change(before, evidence_observation):
         return False
     return True
+
+def _should_veto_no_progress_success(request: VerifierRequest, evidence_observation: dict[str, Any]) -> bool:
+    before = request.before_observation or {}
+    goal = _parse_subtask_goal_text(request.subtask).lower()
+
+    same_screen = (
+        before.get("foreground_package") == evidence_observation.get("foreground_package")
+        and before.get("current_activity") == evidence_observation.get("current_activity")
+        and before.get("ui_description") == evidence_observation.get("ui_description")
+    )
+
+    if not same_screen:
+        return False
+
+    progress_goals = [
+        "open", "launch", "reach", "navigate", "turn on", "turn off",
+        "enable", "disable", "set", "save", "delete", "create", "edit"
+    ]
+    return any(token in goal for token in progress_goals)
 
 
 def _has_toggle_state_change(before: Dict[str, Any], after: Dict[str, Any]) -> bool:

@@ -10,6 +10,7 @@ PIL_AVAILABLE = importlib.util.find_spec("PIL") is not None
 if PIL_AVAILABLE:
     from scripts.task_loop_smoke import (
         build_light_run_result,
+        build_round_summary,
         build_run_summary,
         write_initial_stage_plan_artifacts,
         write_round_artifacts,
@@ -37,7 +38,12 @@ def build_observation(tag: str) -> dict:
         "observation_warning": None,
         "screenshot_b64": PNG_B64,
         "labeled_screenshot_b64": PNG_B64,
-        "extra_state": {"tag": tag},
+        "extra_state": {
+            "tag": tag,
+            "observation_attempt": 1,
+            "observation_resampled": False,
+            "final_after_resample": False,
+        },
     }
 
 
@@ -150,7 +156,15 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                             "prompt_text": "verifier prompt",
                             "messages": [{"role": "user", "content": "verifier prompt"}],
                         },
-                        "post_observation": build_observation("after"),
+                        "post_observation": {
+                            **build_observation("after"),
+                            "extra_state": {
+                                "tag": "after",
+                                "observation_attempt": 2,
+                                "observation_resampled": True,
+                                "final_after_resample": True,
+                            },
+                        },
                     }
                 ],
                 "replan_reason": "subtasks_exhausted",
@@ -178,6 +192,8 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
             self.assertTrue((subtask_dir / "verifier_messages.json").exists())
             self.assertTrue((subtask_dir / "verifier_prompt.txt").exists())
             self.assertTrue((subtask_dir / "verifier_raw_response.txt").exists())
+            subtask_summary = (subtask_dir / "subtask_summary.md").read_text(encoding="utf-8")
+            self.assertIn("- Observation resampled: True", subtask_summary)
             self.assertEqual(artifact_index["planner"]["round_summary"], str(round_dir / "round_summary.md"))
             self.assertEqual(
                 artifact_index["planner"]["planner_raw_quality"],
@@ -236,6 +252,95 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
         self.assertIn("ContactsAddContact", summary)
         self.assertIn("replan_reason=x", summary)
         self.assertIn("group_form_subtask_used", summary)
+
+    def test_build_round_summary_includes_subtask_actor_and_verifier_outcomes(self) -> None:
+        summary = build_round_summary(
+            {
+                "input_observation": build_observation("initial"),
+                "planner_raw_response": '{"tool":"set_tasks"}',
+                "planner_result": {
+                    "is_goal_complete": False,
+                    "subtasks": [
+                        {
+                            "precondition": "Home screen is visible",
+                            "goal": "Open Settings",
+                            "reason": "Need app access",
+                        }
+                    ],
+                },
+                "subtask_runs": [
+                    {
+                        "subtask": {
+                            "precondition": "Home screen is visible",
+                            "goal": "Open Settings",
+                        },
+                        "actor_result": {
+                            "status": "stopped",
+                            "completion_message": "Stop for external verification.",
+                            "steps": [
+                                {
+                                    "step_id": 0,
+                                    "reason": "Settings is visible in the app drawer.",
+                                    "action": {"action_type": "click", "index": 17},
+                                }
+                            ],
+                        },
+                        "subtask_verification": {
+                            "status": "uncertain",
+                            "reason": "Settings is visible, but the Settings app is not yet open.",
+                            "memory_eligible": False,
+                        },
+                    }
+                ],
+                "replan_reason": "verifier_uncertain",
+            }
+        )
+
+        self.assertIn("## Subtask Outcomes", summary)
+        self.assertIn("### Subtask 1", summary)
+        self.assertIn("Actor status: stopped", summary)
+        self.assertIn('Actor final action: {"action_type": "click", "index": 17}', summary)
+        self.assertIn("Actor final reason: Settings is visible in the app drawer.", summary)
+        self.assertIn("Verifier status: uncertain", summary)
+        self.assertIn("Verifier reason: Settings is visible, but the Settings app is not yet open.", summary)
+
+    def test_build_round_summary_handles_empty_steps_and_missing_verifier(self) -> None:
+        summary = build_round_summary(
+            {
+                "input_observation": build_observation("initial"),
+                "planner_raw_response": '{"tool":"set_tasks"}',
+                "planner_result": {
+                    "is_goal_complete": False,
+                    "subtasks": [
+                        {
+                            "precondition": "Launcher is visible",
+                            "goal": "Open Settings",
+                            "reason": "Need app access",
+                        }
+                    ],
+                },
+                "subtask_runs": [
+                    {
+                        "subtask": {
+                            "precondition": "Launcher is visible",
+                            "goal": "Open Settings",
+                        },
+                        "actor_result": {
+                            "status": "parse_error",
+                            "completion_message": "Action payload was invalid.",
+                            "steps": [],
+                        },
+                        "subtask_verification": {},
+                    }
+                ],
+                "replan_reason": "parse_error",
+            }
+        )
+
+        self.assertIn("Actor final action: None", summary)
+        self.assertIn("Actor final reason: Action payload was invalid.", summary)
+        self.assertIn("Verifier status: None", summary)
+        self.assertIn("Verifier reason: None", summary)
 
 
 if __name__ == "__main__":

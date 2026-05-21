@@ -291,6 +291,45 @@ class AndroidActor:
     def messages_to_jsonable(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return json.loads(json.dumps(messages, ensure_ascii=False))
 
+    @staticmethod
+    def _extract_open_app_target(goal: str) -> str | None:
+        text = goal.strip()
+
+        # Open the Settings app
+        match = re.search(r"\b(?:open|launch)\s+(?:the\s+)?(.+?)\s+app\b", text, flags=re.I)
+        if match:
+            app = match.group(1).strip()
+            if app.lower() in {"android settings", "settings"}:
+                return "Settings"
+            return app
+
+        # Special but still generic system app wording
+        if re.search(r"\bsettings\b", text, flags=re.I) and re.search(r"\b(open|launch)\b", text, flags=re.I):
+            return "Settings"
+
+        return None
+
+    @staticmethod
+    def _maybe_plan_direct_open_app_action(subtask: str, observation: dict[str, Any]) -> ActorAction | None:
+        goal = _extract_subtask_goal(subtask)
+        target_app = AndroidActor._extract_open_app_target(goal)
+        if not target_app:
+            return None
+
+        current_text = " ".join(
+            [
+                str(observation.get("foreground_package") or ""),
+                str(observation.get("app_name") or ""),
+                str(observation.get("current_activity") or ""),
+            ]
+        ).lower()
+
+        if target_app.lower() in current_text:
+            return None
+
+        return OpenAppAction(target_app)
+
+
     def run_subtask(
         self,
         env: Any,
@@ -303,6 +342,92 @@ class AndroidActor:
         history = list(request.action_history)
         steps: list[ActorStepResult] = []
         answer_text = ""
+        direct_open_action = self._maybe_plan_direct_open_app_action(request.subtask, current_observation)
+
+        if direct_open_action is not None:
+            after_observation: Dict[str, Any] | None = None
+            execution_error: str | None = None
+            try:
+                env.execute_action(to_json_action(direct_open_action))
+                after_observation = observation_adapter.capture_observation(
+                    env,
+                    request.subtask,
+                    step_id=1,
+                    include_screenshots=True,
+                )
+                current_observation = after_observation
+            except Exception as exc:  # pylint: disable=broad-except
+                execution_error = str(exc)
+
+            heuristic_stop_reason: str | None = None
+            if after_observation is not None:
+                heuristic_stop_reason = _should_stop_for_external_verification(
+                    subtask=request.subtask,
+                    action=direct_open_action,
+                    before_observation=initial_observation,
+                    after_observation=after_observation,
+                )
+                if heuristic_stop_reason:
+                    after_observation = _resample_observation_after_high_impact_stop(
+                        observation_adapter=observation_adapter,
+                        env=env,
+                        goal=request.subtask,
+                        step_id=1,
+                        first_after_observation=after_observation,
+                    )
+                    current_observation = after_observation
+            completion_message = "Direct open_app executed for explicit app-launch goal; stop for external verification."
+            step_status = "execution_error" if execution_error else "stopped"
+            done_reason = "execution_error" if execution_error else "heuristic_stop_for_external_verification"
+            summary = _build_rule_summary(
+                subtask=request.subtask,
+                action=direct_open_action,
+                reason="Direct open_app constraint applied for explicit app-launch goal.",
+                status=step_status,
+                error=execution_error or "",
+            )
+            if not execution_error:
+                summary += f" Heuristic stop: {heuristic_stop_reason or completion_message}"
+            step = ActorStepResult(
+                step_id=0,
+                reason="Direct open_app constraint applied for explicit app-launch goal.",
+                action=direct_open_action,
+                original_action=None,
+                normalized_action=None,
+                action_normalization_applied=False,
+                normalization_reason=None,
+                corrected_action=None,
+                correction_reason=None,
+                messages=[],
+                prompt_text="",
+                raw_response="",
+                parse_error=None,
+                execution_error=execution_error,
+                heuristic_stop_triggered=not execution_error,
+                heuristic_stop_reason=heuristic_stop_reason or completion_message if not execution_error else None,
+                before_observation=initial_observation,
+                after_observation=after_observation,
+                summary=summary,
+                done=True,
+                done_reason=done_reason,
+            )
+            steps.append(step)
+            if execution_error:
+                return ActorRunResult(
+                    status="execution_error",
+                    steps=steps,
+                    final_observation=current_observation,
+                    answer_text=answer_text,
+                    last_action=direct_open_action.to_payload(),
+                )
+            return ActorRunResult(
+                status="stopped",
+                steps=steps,
+                final_observation=current_observation,
+                completion_message=completion_message,
+                answer_text=answer_text,
+                last_action=direct_open_action.to_payload(),
+            )
 
         for step_id in range(self.config.max_steps):
             step_request = ActorRequest(
@@ -445,6 +570,14 @@ class AndroidActor:
                     after_observation=after_observation,
                 )
                 if heuristic_stop_reason:
+                    after_observation = _resample_observation_after_high_impact_stop(
+                        observation_adapter=observation_adapter,
+                        env=env,
+                        goal=request.subtask,
+                        step_id=step_id + 1,
+                        first_after_observation=after_observation,
+                    )
+                    current_observation = after_observation
                     heuristic_stop_triggered = True
                     done_reason = "heuristic_stop_for_external_verification"
                     step_status = "stopped"
@@ -550,23 +683,32 @@ class AndroidActor:
         return (
             "You are an Android Actor executing one GUI subtask at a time.\n\n"
             "Role:\n"
-            "- You are responsible for executing the current subtask on the device.\n"
-            "- You are not responsible for re-planning the overall task.\n"
-            "- Use the current GUI state, recent execution history, and retrieved memory context to decide the next action.\n\n"
-            "Decision policy:\n"
-            "- Focus on the smallest valid action that advances the current subtask.\n"
-            "- Return status complete only when the current subtask goal itself is satisfied.\n"
-            "- If the subtask precondition is clearly unmet and cannot be repaired within the current step, return infeasible.\n"
-            "- If a previous action failed or produced no progress, do not repeat the same action unchanged.\n"
-            "- If an action triggers a visible UI change, stop and wait for the next observation instead of predicting further screens.\n"
-            "- Prefer exact indexed UI actions when a target is visible in the current observation.\n"
-            "- For click and long_press, prefer a clickable index. If the target label is visible but no matching clickable index is exposed in the observation, you may use x/y coordinates for that visible target region instead.\n"
-            "- If the target is a visible control widget such as a switch, checkbox, radio button, or icon button, and no clickable index is exposed, use a coordinate click on the control itself rather than selecting a known non-clickable index.\n"
-            "- If the current subtask is to toggle, enable, or disable a visible control, do not continue tapping nearby UI after you have acted on the target control once.\n"
-            "- After a meaningful control click, prefer to stop and let the next observation verify the state change.\n"
-            "- If the observation is unstable, degraded, or only shows system UI, prefer a cautious recovery action over guessing.\n"
-            "- Treat history and memory as decision evidence, not as logs.\n"
-            "- Do not output code snippets or natural-language-only actions.\n\n"
+            "- Execute only the current subtask on the Android device.\n"
+            "- Do not re-plan the overall task.\n"
+            "- Output exactly one action per turn.\n"
+            "- The Runner will capture the next observation and verify progress after your action.\n\n"
+
+            "Hard action rules:\n"
+            "- If the Goal is to open or launch a named app, use open_app with that app name.\n"
+            "- The app icon does not need to be visible for open_app.\n"
+            "- For 'Open the Settings app', output {\"action_type\":\"open_app\",\"app_name\":\"Settings\"}.\n"
+            "- From the launcher/home screen, never use wait or navigate_back to search for an app.\n"
+            "- Do not return infeasible only because an app icon is not visible; open_app can launch installed apps directly.\n"
+            "- Use wait only after an action was just executed and the screen may still be loading. Do not use wait as the first action on a stable launcher/home screen.\n"
+            "- If the subtask precondition is clearly unmet and cannot be repaired by one valid action, return status infeasible.\n"
+            "- Return status complete only when the current subtask Goal is already satisfied in the current observation.\n\n"
+
+            "GUI grounding rules:\n"
+            "- Prefer exact indexed UI actions when the target is visible and actionable.\n"
+            "- For click and long_press, prefer a clickable index.\n"
+            "- If the target label is visible but no matching clickable index is exposed, use x/y coordinates on the visible target region.\n"
+            "- If the target is a visible switch, checkbox, radio button, or icon button and no clickable index is exposed, use a coordinate click on the control itself.\n"
+            "- Do not click a known non-clickable label when an actionable parent row, container, or coordinate click is needed.\n"
+            "- If a previous action failed or produced no progress, do not repeat it unchanged.\n"
+            "- For toggle/enable/disable subtasks, act on the target control once, then stop; do not keep tapping nearby UI.\n"
+            "- If an action changes the screen, do not predict follow-up actions; the Runner will provide the next observation.\n"
+            "- If the observation is unstable, degraded, or only shows system UI, prefer a cautious recovery action over guessing.\n\n"
+
             "Available actions:\n"
             '- {"action_type":"status","goal_status":"complete","message":"..."}\n'
             '- {"action_type":"status","goal_status":"infeasible","message":"..."}\n'
@@ -582,10 +724,10 @@ class AndroidActor:
             '- {"action_type":"scroll","direction":"up|down|left|right","index":<optional_target_index>}\n'
             '- {"action_type":"open_app","app_name":"..."}\n'
             '- {"action_type":"wait"}\n\n'
+
             "Output format:\n"
-            "Reason: <brief rationale>\n"
+            "Reason: <brief rationale naming the grounded target or tool>\n"
             'Action: {"action_type":"..."}\n'
-            "Return exactly one action per turn."
         )
 
     def _build_legacy_system_prompt(self) -> str:
@@ -657,8 +799,10 @@ class AndroidActor:
         dominant_ui_package = observation.get("app_name") or "Unknown"
         observation_warning = observation.get("observation_warning")
         observation_consistency = observation.get("observation_consistency") or "stable"
+
         return (
             f"Subtask:\n{request.subtask}\n\n"
+
             "Current screen state:\n"
             f"- Foreground package: {foreground_package}\n"
             f"- Dominant visible UI package: {dominant_ui_package}\n"
@@ -668,43 +812,42 @@ class AndroidActor:
             f"- Clickable UI count: {observation.get('clickable_ui_count', 0)}\n"
             f"- Non-system UI count: {observation.get('non_system_ui_count', 0)}\n"
             f"- Observation consistency: {observation_consistency}\n"
-            "- You are given a screenshot in this message with red boxes around retained UI elements. Final action indices must come from the Visible UI index table below.\n\n"
-            f"Observation warning:\n{observation_warning or 'None'}\n\n"
-            f"Visible UI index table:\n{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
-            f"Visible UI elements:\n{observation.get('ui_description') or 'No visible UI elements available.'}\n\n"
-            f"Visible UI elements JSON:\n{self._format_ui_json(observation.get('ui_elements') or [])}\n\n"
-            f"Recent execution history:\n{self._format_history(request.action_history)}\n\n"
+            f"- Observation warning: {observation_warning or 'None'}\n\n"
+
+            "Visible UI index table:\n"
+            f"{self._format_ui_index_table(observation.get('ui_elements') or [])}\n\n"
+
+            "Visible UI elements JSON:\n"
+            f"{self._format_ui_json(observation.get('ui_elements') or [])}\n\n"
+
+            "Recent execution history:\n"
+            f"{self._format_history(request.action_history)}\n\n"
+
             "Retrieved memory context:\n"
             f"{self._truncate(request.memory_context.strip(), self.config.max_memory_context_chars) or 'None'}\n\n"
-            "Decision policy:\n"
-            "- Execute this subtask step by step using one valid GUI action.\n"
-            "- Base the choice on the current GUI state, history, and memory.\n"
-            "- Prefer the smallest necessary action that advances the subtask.\n"
-            "- Use status complete only when the Goal in the current subtask is satisfied.\n"
-            "- If the subtask precondition is unmet or the required target is unavailable, use status infeasible.\n"
-            "- If a previous action failed or produced no progress, do not repeat it unchanged.\n"
-            "- If the Goal is to open or launch an app and the current foreground package is not that app, prefer open_app instead of wait.\n"
-            "- Do not use wait on launcher or other static screens when a concrete app-launch action is available.\n"
-            "- For indexed actions, the chosen index must match the exact element named in your reasoning.\n"
-            "- Only use indices that appear in the current Visible UI index table.\n"
-            "- If a number does not appear in the current Visible UI index table, it is not a legal action index.\n"
-            "- Do not copy or invent numbers from the screenshot. Use the screenshot for layout and target appearance only; use the text index table for the final action index.\n"
+
+            "Decision reminders:\n"
+            "- Execute the current subtask with exactly one valid action.\n"
+            "- Use the current screen, action history, and memory as evidence.\n"
+            "- Use status complete only if the current subtask Goal is already satisfied now.\n"
+            "- Use status infeasible only if the precondition or target cannot be repaired by one valid action.\n"
+            "- If the Goal is to open or launch a named app, use open_app. The app icon does not need to be visible.\n"
+            "- For 'Open the Settings app', use {\"action_type\":\"open_app\",\"app_name\":\"Settings\"}.\n"
+            "- From a stable launcher/home screen, do not use wait or navigate_back to find an app.\n"
+            "- If the exact target word is not visible, look for a visible parent category or semantically related entry before scrolling.\n"
+            "- For Wi-Fi goals inside Android Settings, 'Internet', 'Network & internet', or 'Networks available' are relevant entries that may lead to Wi-Fi controls.\n"
+            "- If a relevant entry is visible, click that entry instead of scrolling.\n"
+            "- Use scroll only when no visible entry, category, row, or control is semantically related to the subtask goal.\n"
+            "- Do not use wait as the first action unless the screen is unstable, loading, or recovering from a just-executed action.\n"
+            "- For indexed actions, use only indices from the current Visible UI index table.\n"
+            "- If a target is visible but has no legal clickable index, use x/y coordinates on the visible target region.\n"
+            "- Do not invent indices from the screenshot.\n"
             "- Do not output action_type swipe; use scroll instead.\n"
-            "- If the target text is visible but that element is not clickable, do not click the non-clickable label. Choose the clickable row, parent container, or equivalent actionable element associated with that label.\n"
-            "- If the target itself is directly clickable, use its exact index rather than a nearby unrelated container.\n"
-            "- If the target label is visible but no matching clickable index is available in the observation, use x/y coordinates for that visible target region instead of selecting a known non-clickable label index.\n"
-            "- If the target is a visible control widget such as a switch, checkbox, radio button, or icon button, and no clickable index is exposed, use a coordinate click on the control itself rather than selecting a known non-clickable index.\n"
-            "- If you can see the target but cannot map it to a legal index from the Visible UI index table, use open_app, x/y coordinates, or status infeasible instead of inventing a new index.\n"
-            "- If the current subtask is to toggle, enable, or disable a visible control, do not continue tapping nearby UI after you have acted on the target control once.\n"
-            "- After a meaningful control click, prefer to stop and let the next observation verify the state change.\n"
-            "- If an action triggers a visible UI change, stop rather than predicting the next screen.\n"
-            "- If the observation warning indicates degraded UI, avoid assuming the goal is complete.\n"
-            "- If observation consistency is unstable, prefer wait or navigate_back rather than blind taps.\n"
-            "- Return exactly one action in the required JSON action format.\n\n"
+            "- After a meaningful app launch, navigation, form edit, or control click, output only that action and let the Runner verify the next screen.\n\n"
+
             "Output format:\n"
-            "Reason: <brief rationale>\n"
+            "Reason: <brief rationale naming the grounded target or tool>\n"
             'Action: {"action_type":"..."}\n'
-            "Return exactly one action per turn."
         )
 
     def _build_generic_example_prompt(self, request: ActorRequest) -> str:
@@ -1220,16 +1363,84 @@ def _maybe_correct_pointing_payload(
             return None, None
     if not target_token and not control_target_requested:
         return None, None
-    matches: list[dict[str, Any]] = []
-    for element in ui_elements:
-        if not _element_matches_token(element, target_token):
-            continue
-        if require_clickable and not bool(element.get("is_clickable")):
-            continue
-        if require_editable and not bool(element.get("is_editable")):
-            continue
-        matches.append(element)
-    if len(matches) != 1:
+    semantic_matches = [
+        element
+        for element in ui_elements
+        if target_token and _element_matches_token(element, target_token)
+    ]
+    if len(semantic_matches) == 1:
+        match = semantic_matches[0]
+        if _element_satisfies_constraints(match, require_clickable=require_clickable, require_editable=require_editable):
+            candidate["index"] = int(match["index"])
+            return candidate, "Corrected click target from unique clickable semantic match."
+        if control_target_requested and current_target is not None:
+            fallback, fallback_kind = _build_coordinate_fallback_payload(
+                candidate,
+                current_target,
+                target_token,
+                subtask=subtask,
+                reason=reason,
+            )
+            if fallback is not None and fallback_kind == "control":
+                return fallback, (
+                    "Original index pointed to a non-clickable control widget, no matching clickable index was available, "
+                    "and the action was downgraded to a bbox-based coordinate click on the visible control widget because no clickable index was exposed."
+                )
+        fallback, fallback_kind = _build_coordinate_fallback_payload_from_match(
+            candidate,
+            match,
+            subtask=subtask,
+            reason=reason,
+        )
+        if fallback is not None and fallback_kind == "label":
+            return fallback, "Corrected click target from unique non-clickable semantic match by using a bbox-based coordinate click."
+        if fallback is not None and fallback_kind == "control":
+            return fallback, (
+                "Original index pointed to a non-clickable control widget, no matching clickable index was available, "
+                "and the action was downgraded to a bbox-based coordinate click on the visible control widget because no clickable index was exposed."
+            )
+        return None, None
+
+    if len(semantic_matches) > 1:
+        constrained_clickable_matches = [
+            element
+            for element in semantic_matches
+            if _element_satisfies_constraints(element, require_clickable=require_clickable, require_editable=require_editable)
+        ]
+        if len(constrained_clickable_matches) == 1:
+            candidate["index"] = int(constrained_clickable_matches[0]["index"])
+            return candidate, "Corrected click target from unique clickable match among multiple semantic matches."
+        if not constrained_clickable_matches:
+            if control_target_requested and current_target is not None:
+                fallback, fallback_kind = _build_coordinate_fallback_payload(
+                    candidate,
+                    current_target,
+                    target_token,
+                    subtask=subtask,
+                    reason=reason,
+                )
+                if fallback is not None and fallback_kind == "control":
+                    return fallback, (
+                        "Original index pointed to a non-clickable control widget, no matching clickable index was available, "
+                        "and the action was downgraded to a bbox-based coordinate click on the visible control widget because no clickable index was exposed."
+                    )
+            exact_label_matches = [
+                element
+                for element in semantic_matches
+                if _is_exact_visible_label_match(element, target_token)
+                and (not require_editable or bool(element.get("is_editable")))
+            ]
+            if len(exact_label_matches) == 1:
+                fallback, fallback_kind = _build_coordinate_fallback_payload_from_match(
+                    candidate,
+                    exact_label_matches[0],
+                    subtask=subtask,
+                    reason=reason,
+                )
+                if fallback is not None and fallback_kind == "label":
+                    return fallback, (
+                        "Corrected click target from unique exact visible label match among multiple non-clickable matches by using a bbox-based coordinate click."
+                    )
         if require_clickable and current_target is not None:
             fallback, fallback_kind = _build_coordinate_fallback_payload(
                 candidate,
@@ -1238,20 +1449,27 @@ def _maybe_correct_pointing_payload(
                 subtask=subtask,
                 reason=reason,
             )
-            if fallback is not None and fallback_kind == "label":
-                return fallback, (
-                    "Original index pointed to a non-clickable target label, no matching clickable index was available, "
-                    "and the action was downgraded to a bbox-based coordinate click on the visible target label region."
-                )
             if fallback is not None and fallback_kind == "control":
                 return fallback, (
                     "Original index pointed to a non-clickable control widget, no matching clickable index was available, "
                     "and the action was downgraded to a bbox-based coordinate click on the visible control widget because no clickable index was exposed."
                 )
         return None, None
-    candidate["index"] = int(matches[0]["index"])
-    action_name = str(candidate.get("action_type") or "action")
-    return candidate, f"Corrected {action_name} target from reasoning-grounded unique UI match."
+
+    if require_clickable and current_target is not None:
+        fallback, fallback_kind = _build_coordinate_fallback_payload(
+            candidate,
+            current_target,
+            target_token,
+            subtask=subtask,
+            reason=reason,
+        )
+        if fallback is not None and fallback_kind == "control":
+            return fallback, (
+                "Original index pointed to a non-clickable control widget, no matching clickable index was available, "
+                "and the action was downgraded to a bbox-based coordinate click on the visible control widget because no clickable index was exposed."
+            )
+    return None, None
 
 def _extract_target_token(
     subtask: str,
@@ -1270,9 +1488,17 @@ def _extract_target_token(
         "wi-fi",
         "wifi",
         "bluetooth",
+        "settings",
+        "phone",
+        "contacts",
     ):
         if token in combined_text:
             return _normalize_match_text(token)
+    for source_text in (goal_text, reason):
+        label = _extract_visible_label_candidate(source_text)
+        normalized = _normalize_match_text(label)
+        if normalized:
+            return normalized
     fallback_fields = []
     if current_target:
         fallback_fields.extend(
@@ -1328,6 +1554,42 @@ def _build_coordinate_fallback_payload(
     if width <= 0 or height <= 0:
         return None, None
     if is_control_fallback and not is_label_match:
+        x = int(round(x_min + (0.5 * width)))
+        y = int(round(y_min + (0.5 * height)))
+        fallback_kind = "control"
+    else:
+        x = int(round(x_min + (0.3 * width)))
+        y = int(round(y_min + (0.5 * height)))
+        fallback_kind = "label"
+    return (
+        {
+            "action_type": payload.get("action_type"),
+            "x": x,
+            "y": y,
+        },
+        fallback_kind,
+    )
+
+
+def _build_coordinate_fallback_payload_from_match(
+    payload: dict[str, Any],
+    matched_element: dict[str, Any],
+    *,
+    subtask: str,
+    reason: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    bbox = matched_element.get("bbox") or ()
+    if len(bbox) != 4:
+        return None, None
+    try:
+        x_min, y_min, x_max, y_max = [int(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None, None
+    width = x_max - x_min
+    height = y_max - y_min
+    if width <= 0 or height <= 0:
+        return None, None
+    if _is_control_like_target(matched_element) and _goal_or_reason_requests_toggle(subtask, reason):
         x = int(round(x_min + (0.5 * width)))
         y = int(round(y_min + (0.5 * height)))
         fallback_kind = "control"
@@ -1465,6 +1727,72 @@ def _element_matches_token(element: dict[str, Any], token: str) -> bool:
         if any(alias in value or value in alias for alias in alias_set):
             return True
     return False
+
+
+def _element_satisfies_constraints(
+    element: dict[str, Any],
+    *,
+    require_clickable: bool = False,
+    require_editable: bool = False,
+) -> bool:
+    if require_clickable and not bool(element.get("is_clickable")):
+        return False
+    if require_editable and not bool(element.get("is_editable")):
+        return False
+    return True
+
+
+def _is_exact_visible_label_match(element: dict[str, Any], target_token: str) -> bool:
+    normalized_token = _normalize_match_text(target_token)
+    if not normalized_token:
+        return False
+    for field in ("text", "content_description"):
+        value = _normalize_match_text(element.get(field) or "")
+        if value and value == normalized_token:
+            return True
+    return False
+
+
+def _extract_visible_label_candidate(text: str) -> str | None:
+    normalized_text = str(text or "").strip()
+    if not normalized_text:
+        return None
+    label_patterns = (
+        r"\bsettings\b",
+        r"\bnetwork\s*&\s*internet\b",
+        r"\bwi-?fi\b",
+        r"\bbluetooth\b",
+        r"\bcontacts\b",
+    )
+    for pattern in label_patterns:
+        match = re.search(pattern, normalized_text, flags=re.I)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _resample_observation_after_high_impact_stop(
+    *,
+    observation_adapter: ObservationAdapter,
+    env: Any,
+    goal: str,
+    step_id: int,
+    first_after_observation: Dict[str, Any],
+) -> Dict[str, Any]:
+    resampled_observation = observation_adapter.capture_observation(
+        env,
+        goal,
+        step_id=step_id,
+        include_screenshots=True,
+    )
+    extra_state = dict(resampled_observation.get("extra_state") or {})
+    first_extra_state = dict(first_after_observation.get("extra_state") or {})
+    previous_attempt = int(first_extra_state.get("observation_attempt") or 1)
+    extra_state["observation_attempt"] = max(previous_attempt + 1, 2)
+    extra_state["observation_resampled"] = True
+    extra_state["final_after_resample"] = True
+    resampled_observation["extra_state"] = extra_state
+    return resampled_observation
 
 
 def to_json_action(action: ActorAction) -> json_action.JSONAction:

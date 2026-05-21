@@ -67,6 +67,40 @@ class FakeObservationAdapter:
         )
 
 
+class SequencedObservationAdapter(FakeObservationAdapter):
+    def __init__(self, observations: list[dict]) -> None:
+        super().__init__()
+        self.observations = list(observations)
+
+    def capture_observation(
+        self,
+        env,
+        goal: str,
+        *,
+        step_id: int = 0,
+        include_screenshots: bool = True,
+    ):
+        self.calls.append(
+            {
+                "goal": goal,
+                "step_id": step_id,
+                "include_screenshots": include_screenshots,
+                "action_count": len(env.actions),
+            }
+        )
+        if not self.observations:
+            raise AssertionError("No fake observation queued.")
+        observation = dict(self.observations.pop(0))
+        extra_state = dict(observation.get("extra_state") or {})
+        extra_state.setdefault("step_id", step_id)
+        extra_state.setdefault("orientation", 0)
+        extra_state.setdefault("observation_attempt", 1)
+        extra_state.setdefault("observation_resampled", False)
+        extra_state.setdefault("final_after_resample", False)
+        observation["extra_state"] = extra_state
+        return observation
+
+
 def build_observation(
     *,
     step_id: int = 0,
@@ -434,6 +468,116 @@ class ActorActionParsingTest(unittest.TestCase):
         self.assertEqual(corrected, {"action_type": "click", "x": 320, "y": 860})
         self.assertIn("bbox-based coordinate click", correction_reason or "")
 
+    def test_corrects_multiple_semantic_matches_to_unique_clickable_index(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 5,
+                "text": "Network & internet",
+                "content_description": None,
+                "resource_name": "android:id/title",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [189, 824, 625, 895],
+            },
+            {
+                "index": 7,
+                "text": "Network & internet",
+                "content_description": "Network & internet",
+                "resource_name": "android:id/row",
+                "is_clickable": True,
+                "is_editable": False,
+                "bbox": [120, 800, 900, 950],
+            },
+        ]
+        observation["valid_ui_indices"] = [5, 7]
+        action, _, _, _, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 99},
+            observation,
+            reason="The Network & internet option is visible and should be opened.",
+            subtask="Precondition: Settings is open. Goal: Open Network & internet.",
+        )
+        self.assertIsInstance(action, ClickAction)
+        self.assertEqual(action.index, 7)
+        self.assertEqual(corrected, {"action_type": "click", "index": 7})
+        self.assertIn("unique clickable match among multiple semantic matches", correction_reason or "")
+
+    def test_corrects_multiple_non_clickable_matches_to_unique_exact_label_bbox(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 5,
+                "text": "Network & internet",
+                "content_description": None,
+                "resource_name": "android:id/title",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [189, 824, 625, 895],
+            },
+            {
+                "index": 6,
+                "text": "Mobile, Wi-Fi, hotspot",
+                "content_description": "Network & internet settings summary",
+                "resource_name": "android:id/summary",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [189, 895, 540, 946],
+            },
+        ]
+        observation["valid_ui_indices"] = [5, 6]
+        action, _, _, _, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 99},
+            observation,
+            reason="The Network & internet option is visible and should be opened.",
+            subtask="Precondition: Settings is open. Goal: Open Network & internet.",
+        )
+        self.assertIsInstance(action, ClickAction)
+        self.assertIsNone(action.index)
+        self.assertEqual(action.x, 320)
+        self.assertEqual(action.y, 860)
+        self.assertEqual(corrected, {"action_type": "click", "x": 320, "y": 860})
+        self.assertIn("unique exact visible label match among multiple non-clickable matches", correction_reason or "")
+
+    def test_multiple_semantic_matches_without_unique_safe_target_are_not_corrected(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 5,
+                "text": "Network & internet",
+                "content_description": None,
+                "resource_name": "android:id/title",
+                "is_clickable": False,
+                "is_editable": False,
+                "bbox": [189, 824, 625, 895],
+            },
+            {
+                "index": 7,
+                "text": "Network & internet",
+                "content_description": "Network & internet",
+                "resource_name": "android:id/row",
+                "is_clickable": True,
+                "is_editable": False,
+                "bbox": [120, 800, 900, 950],
+            },
+            {
+                "index": 8,
+                "text": "Network & internet",
+                "content_description": "Network & internet",
+                "resource_name": "android:id/row_alt",
+                "is_clickable": True,
+                "is_editable": False,
+                "bbox": [120, 960, 900, 1110],
+            },
+        ]
+        observation["valid_ui_indices"] = [5, 7, 8]
+        with self.assertRaisesRegex(ValueError, "valid_ui_indices"):
+            parse_actor_action(
+                {"action_type": "click", "index": 99},
+                observation,
+                reason="The Network & internet option is visible and should be opened.",
+                subtask="Precondition: Settings is open. Goal: Open Network & internet.",
+            )
+
     def test_non_clickable_target_without_bbox_still_fails(self) -> None:
         observation = build_observation()
         observation["ui_elements"] = [
@@ -609,6 +753,93 @@ class ActorActionParsingTest(unittest.TestCase):
 
 
 class ActorExecutionTest(unittest.TestCase):
+    def test_high_impact_click_stopped_path_resamples_observation_before_return(self) -> None:
+        llm = FakeLLMClient(
+            ['Reason: tap create.\nAction: {"action_type":"click","index":3}']
+        )
+        actor = AndroidActor(llm, ActorConfig(max_steps=1))
+        env = FakeEnv()
+        first_observation = build_observation(
+            step_id=1,
+            activity="activity-first",
+            app_name="com.android.contacts",
+        )
+        second_observation = build_observation(
+            step_id=1,
+            activity="activity-resampled",
+            app_name="com.android.contacts",
+        )
+        adapter = SequencedObservationAdapter([first_observation, second_observation])
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(subtask="Precondition: Contacts is open. Goal: Tap create contact.", observation=build_observation()),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(result.steps[0].after_observation["current_activity"], "activity-resampled")
+        self.assertEqual(result.final_observation["current_activity"], "activity-resampled")
+        extra_state = result.final_observation.get("extra_state") or {}
+        self.assertTrue(extra_state.get("observation_resampled"))
+        self.assertTrue(extra_state.get("final_after_resample"))
+        self.assertEqual(extra_state.get("observation_attempt"), 2)
+
+    def test_status_complete_path_does_not_resample_observation(self) -> None:
+        llm = FakeLLMClient(['Reason: done.\nAction: {"action_type":"status","goal_status":"complete","message":"ok"}'])
+        actor = AndroidActor(llm)
+        env = FakeEnv()
+        adapter = FakeObservationAdapter()
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(subtask="Finish contact creation", observation=build_observation()),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(adapter.calls), 0)
+
+    def test_direct_open_app_stopped_path_resamples_observation_before_return(self) -> None:
+        llm = FakeLLMClient([])
+        actor = AndroidActor(llm)
+        env = FakeEnv()
+        first_observation = build_observation(
+            step_id=1,
+            activity="com.android.settings/.Transitional",
+            app_name="com.android.settings",
+            foreground_package="com.android.settings",
+        )
+        second_observation = build_observation(
+            step_id=1,
+            activity="com.android.settings/.Stable",
+            app_name="com.android.settings",
+            foreground_package="com.android.settings",
+        )
+        adapter = SequencedObservationAdapter([first_observation, second_observation])
+        observation = build_observation(
+            foreground_package="com.google.android.apps.nexuslauncher",
+            app_name="com.google.android.apps.nexuslauncher",
+            activity="com.google.android.apps.nexuslauncher/.NexusLauncherActivity",
+        )
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(
+                subtask="Precondition: The launcher is visible. Goal: Open the Settings app.",
+                observation=observation,
+            ),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(result.steps[0].after_observation["current_activity"], "com.android.settings/.Stable")
+        extra_state = result.steps[0].after_observation.get("extra_state") or {}
+        self.assertTrue(extra_state.get("observation_resampled"))
+        self.assertEqual(extra_state.get("observation_attempt"), 2)
+
     def test_toggle_control_click_stops_after_first_meaningful_action(self) -> None:
         llm = FakeLLMClient(
             ['Reason: The grounded target element is the Wi-Fi switch.\nAction: {"action_type":"click","index":10}']
@@ -880,6 +1111,87 @@ class ActorExecutionTest(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "execution_error")
+        self.assertIn("boom", result.steps[0].execution_error or "")
+
+    def test_explicit_open_app_goal_uses_direct_open_app_without_llm(self) -> None:
+        llm = FakeLLMClient([])
+        actor = AndroidActor(llm)
+        env = FakeEnv()
+        adapter = FakeObservationAdapter()
+        observation = build_observation(
+            foreground_package="com.google.android.apps.nexuslauncher",
+            app_name="com.google.android.apps.nexuslauncher",
+            activity="com.google.android.apps.nexuslauncher/.NexusLauncherActivity",
+        )
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(
+                subtask="Precondition: The launcher is visible. Goal: Open the Settings app.",
+                observation=observation,
+            ),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(len(llm.messages), 0)
+        self.assertEqual(len(result.steps), 1)
+        self.assertEqual(result.steps[0].action.to_payload(), {"action_type": "open_app", "app_name": "Settings"})
+        self.assertEqual(result.steps[0].prompt_text, "")
+        self.assertEqual(result.steps[0].raw_response, "")
+        self.assertIn("Direct open_app constraint applied", result.steps[0].reason)
+        self.assertIn("Direct open_app executed", result.completion_message)
+        self.assertEqual(getattr(env.actions[0], "action_type", None), "open_app")
+        self.assertEqual(getattr(env.actions[0], "app_name", None), "Settings")
+
+    def test_direct_open_app_not_triggered_when_already_in_target_app(self) -> None:
+        llm = FakeLLMClient(['Reason: already open.\nAction: {"action_type":"status","goal_status":"complete","message":"done"}'])
+        actor = AndroidActor(llm)
+        env = FakeEnv()
+        adapter = FakeObservationAdapter()
+        observation = build_observation(
+            foreground_package="com.android.settings",
+            app_name="com.android.settings",
+            activity="com.android.settings/.Settings",
+        )
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(
+                subtask="Precondition: The launcher is visible. Goal: Open the Settings app.",
+                observation=observation,
+            ),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(llm.messages), 1)
+        self.assertEqual(len(env.actions), 0)
+
+    def test_direct_open_app_execution_error_returns_execution_error(self) -> None:
+        llm = FakeLLMClient([])
+        actor = AndroidActor(llm)
+        env = FakeEnv()
+        env.fail_on_execute = True
+        adapter = FakeObservationAdapter()
+        observation = build_observation(
+            foreground_package="com.google.android.apps.nexuslauncher",
+            app_name="com.google.android.apps.nexuslauncher",
+            activity="com.google.android.apps.nexuslauncher/.NexusLauncherActivity",
+        )
+
+        result = actor.run_subtask(
+            env,
+            ActorRequest(
+                subtask="Precondition: The launcher is visible. Goal: Open the Settings app.",
+                observation=observation,
+            ),
+            adapter,
+        )
+
+        self.assertEqual(result.status, "execution_error")
+        self.assertEqual(len(llm.messages), 0)
+        self.assertEqual(len(result.steps), 1)
         self.assertIn("boom", result.steps[0].execution_error or "")
 
     def test_step_limit_returns_step_limit(self) -> None:

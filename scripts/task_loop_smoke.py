@@ -232,6 +232,8 @@ def build_subtask_summary(subtask_run: dict[str, Any]) -> str:
     success_check = subtask_run.get("subtask_success_check") or {}
     verification = subtask_run.get("subtask_verification") or {}
     form_fill_progress = success_check.get("form_fill_progress") or {}
+    final_observation = subtask_run.get("post_observation") or {}
+    final_extra_state = final_observation.get("extra_state") or {}
     lines = [
         "# Subtask Summary",
         "",
@@ -243,6 +245,7 @@ def build_subtask_summary(subtask_run: dict[str, Any]) -> str:
         f"- Verifier reason: {verification.get('reason') or 'None'}",
         f"- Memory eligible: {verification.get('memory_eligible') if verification else 'None'}",
         f"- Final warning: {(subtask_run.get('post_observation') or {}).get('observation_warning') or 'None'}",
+        f"- Observation resampled: {bool(final_extra_state.get('observation_resampled', False))}",
         f"- Text entry success detected: {str((success_check.get('success_rule') or '')).startswith('text_entry_')}",
         "",
     ]
@@ -411,6 +414,7 @@ def build_round_summary(round_record: dict[str, Any]) -> str:
                     f"- Normalized {index}: Precondition={subtask.get('precondition')} | "
                     f"Goal={subtask.get('goal')} | Reason={subtask.get('reason')}"
                 )
+    lines.extend(build_round_subtask_outcome_lines(round_record.get("subtask_runs") or []))
     lines.extend(
         [
             "",
@@ -420,6 +424,37 @@ def build_round_summary(round_record: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def build_round_subtask_outcome_lines(subtask_runs: list[dict[str, Any]]) -> list[str]:
+    if not subtask_runs:
+        return ["", "## Subtask Outcomes", "- No subtask runs recorded."]
+
+    lines = ["", "## Subtask Outcomes"]
+    for index, subtask_run in enumerate(subtask_runs, start=1):
+        subtask = subtask_run.get("subtask") or {}
+        actor_result = subtask_run.get("actor_result") or {}
+        verification = subtask_run.get("subtask_verification") or {}
+        steps = actor_result.get("steps") or []
+        final_step = steps[-1] if steps else {}
+        final_action = final_step.get("action")
+        if not final_action:
+            final_action = final_step.get("original_action")
+        final_reason = final_step.get("reason") or actor_result.get("completion_message") or actor_result.get("status") or "None"
+        lines.extend(
+            [
+                "",
+                f"### Subtask {index}",
+                f"- Task: Precondition={subtask.get('precondition')} | Goal={subtask.get('goal')}",
+                f"- Actor status: {actor_result.get('status') or 'None'}",
+                f"- Actor completion message: {actor_result.get('completion_message') or 'None'}",
+                f"- Actor final action: {json.dumps(final_action, ensure_ascii=False) if final_action else 'None'}",
+                f"- Actor final reason: {final_reason}",
+                f"- Verifier status: {verification.get('status') or 'None'}",
+                f"- Verifier reason: {verification.get('reason') or 'None'}",
+            ]
+        )
+    return lines
 
 
 def build_run_summary(task: str, goal: str, run_result: dict[str, Any]) -> str:
