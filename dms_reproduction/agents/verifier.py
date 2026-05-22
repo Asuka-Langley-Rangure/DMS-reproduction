@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any, Dict, List, Literal, Optional, Protocol
 
+from dms_reproduction.llm.base_client import LLMUsage, get_client_usage
 
 VerifierStatus = Literal["success", "failure", "uncertain"]
 VerifierSource = Literal["llm_verifier", "androidworld_evaluator", "heuristic"]
@@ -44,6 +45,7 @@ class VerifierResult:
     parse_error: str | None = None
     prompt_text: str = ""
     messages: List[Dict[str, Any]] = field(default_factory=list)
+    usage: LLMUsage | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,6 +57,7 @@ class VerifierResult:
             "parse_error": self.parse_error,
             "prompt_text": self.prompt_text,
             "messages": self.messages,
+            "usage": self.usage,
         }
 
 
@@ -100,6 +103,7 @@ class AndroidVerifier:
             messages=messages,
             temperature=self.config.temperature,
         )
+        usage = get_client_usage(self.llm_client)
         parsed = extract_json_object(raw_response)
         if parsed is None:
             return VerifierResult(
@@ -111,6 +115,7 @@ class AndroidVerifier:
                 parse_error="Failed to parse verifier response JSON.",
                 prompt_text=prompt_text,
                 messages=messages_jsonable,
+                usage=usage,
             )
         try:
             status = _parse_verifier_status(parsed)
@@ -130,6 +135,7 @@ class AndroidVerifier:
                 parse_error=None,
                 prompt_text=prompt_text,
                 messages=messages_jsonable,
+                usage=usage,
             )
         except ValueError as exc:
             return VerifierResult(
@@ -141,6 +147,7 @@ class AndroidVerifier:
                 parse_error=str(exc),
                 prompt_text=prompt_text,
                 messages=messages_jsonable,
+                usage=usage,
             )
 
     def _build_system_prompt(self) -> str:
@@ -155,6 +162,8 @@ class AndroidVerifier:
             "- Treat action_history only as supporting evidence for or against what the screenshot shows.\n"
             "- Do not infer success from action history alone.\n"
             "- If action history and screenshot conflict, prioritize the screenshot.\n"
+            "- For open, click-to-proceed, navigate, tab, dialog, screen, or reach goals, success requires evidence that the resulting screen or state actually advanced.\n"
+            "- A button, option, tab, or entry point merely remaining visible and actionable is not enough for transition success.\n"
             "- For save/submit/create/confirm goals, leaving the editor/form page is not a failure by itself.\n"
             "- If the final observation shows the created/saved item in a list, detail page, or search result, mark success.\n\n"
             "Output policy:\n"
@@ -212,6 +221,8 @@ class AndroidVerifier:
             "- If the Goal is to open an app, success requires the target app to be in foreground.\n"
             "- A visible launcher icon or actionable app shortcut is not enough.\n" 
             "- If before_observation and evidence_observation show the same app, activity, and UI, then a navigation/open/reach/toggle goal is NOT successful unless the Goal was already satisfied before.\n"
+            "- For open, click-to-proceed, navigate, dialog, tab, or screen goals, compare before_observation and evidence_observation and confirm that the resulting screen/state actually advanced.\n"
+            "- If the final screen still only shows the same entry button, tab, option, or prompt, do not mark success.\n"
             "- Actor history is supporting evidence only. The final evidence_observation is the ground truth.\n"
             "- If the foreground package is an input method such as com.google.android.inputmethod.latin, do not treat it as leaving the target app.\n"
             "- When a soft keyboard is active, use current_activity and underlying editor UI labels to determine whether the form is still open.\n"
@@ -426,12 +437,16 @@ def _classify_subtask_goal(subtask: str) -> str:
     lowered = parsed.lower()
     if re.search(r"\b(open|launch)\b.+\bapp\b", lowered):
         return "app_launch"
+    if re.search(r"\b(type|fill|input)\b", lowered):
+        return "form_fill"
+    if re.search(r"\benter\b.+\b(field|form|name|number|text|message|value)\b", lowered):
+        return "form_fill"
     if re.search(r"\b(turn off|turn on|toggle|switch off|switch on|enable|disable)\b", lowered):
         return "toggle"
-    if re.search(r"\b(navigate|go to|open|access|reach|enter|switch to|click on)\b", lowered):
+    if re.search(r"\b(navigate|go to|open|access|reach|switch to|click on|click)\b", lowered):
         return "navigation"
-    if re.search(r"\b(type|enter|fill|input)\b", lowered):
-        return "form_fill"
+    if any(token in lowered for token in ("proceed", "start", "dialog", "screen", "tab")):
+        return "navigation"
     if re.search(r"\b(save|submit|confirm)\b", lowered):
         return "submit"
     if re.search(r"\b(answer|report|tell|say)\b", lowered):
@@ -498,15 +513,13 @@ def _history_is_non_progress_only(action_history: List[Dict[str, Any]]) -> bool:
 
 def _should_veto_navigation_success(request: VerifierRequest, evidence_observation: Dict[str, Any]) -> bool:
     before = request.before_observation or {}
-    before_activity = str(before.get("current_activity") or "")
-    after_activity = str(evidence_observation.get("current_activity") or "")
-    before_foreground = str(before.get("foreground_package") or "")
-    after_foreground = str(evidence_observation.get("foreground_package") or "")
-    if before_activity != after_activity or before_foreground != after_foreground:
-        return False
     if any(str(item.get("error") or "").strip() for item in request.action_history):
         return True
     if _history_is_non_progress_only(request.action_history):
+        return True
+    if _has_transition_progress_evidence(request, evidence_observation):
+        return False
+    if _reason_is_visibility_only(request.action_history):
         return True
     return _goal_target_still_only_visible(request.subtask, before, evidence_observation)
 
@@ -549,9 +562,113 @@ def _should_veto_no_progress_success(request: VerifierRequest, evidence_observat
 
     progress_goals = [
         "open", "launch", "reach", "navigate", "turn on", "turn off",
-        "enable", "disable", "set", "save", "delete", "create", "edit"
+        "enable", "disable", "set", "save", "delete", "create", "edit",
+        "proceed", "dialog", "screen", "tab", "start"
     ]
     return any(token in goal for token in progress_goals)
+
+
+def _reason_is_visibility_only(action_history: List[Dict[str, Any]]) -> bool:
+    if not action_history:
+        return False
+    item = action_history[-1]
+    combined = " ".join(
+        [
+            str(item.get("reason") or ""),
+            str(item.get("summary") or ""),
+        ]
+    ).lower()
+    if not combined:
+        return False
+    visibility_markers = (
+        "visible",
+        "clickable",
+        "actionable",
+        "button is visible",
+        "option is visible",
+        "tab is visible",
+    )
+    progress_markers = (
+        "opened",
+        "open now",
+        "foreground",
+        "dialog",
+        "screen",
+        "setup",
+        "appeared",
+        "displayed",
+        "shown",
+        "contains",
+        "entered",
+        "active",
+    )
+    return any(marker in combined for marker in visibility_markers) and not any(
+        marker in combined for marker in progress_markers
+    )
+
+
+def _underlying_foreground_package(observation: Dict[str, Any]) -> str:
+    foreground = str(observation.get("foreground_package") or "").lower()
+    if foreground == "com.google.android.inputmethod.latin":
+        return str(observation.get("app_name") or "").lower()
+    return foreground
+
+
+def _visible_labels(observation: Dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for element in observation.get("ui_elements") or []:
+        label = (
+            element.get("text")
+            or element.get("content_description")
+            or element.get("resource_name")
+            or ""
+        )
+        normalized = str(label).strip().lower()
+        if normalized:
+            labels.append(normalized)
+    return labels
+
+
+def _after_contains_goal_stage_cues(request: VerifierRequest, evidence_observation: Dict[str, Any]) -> bool:
+    goal = _parse_subtask_goal_text(request.subtask).lower()
+    labels = _visible_labels(evidence_observation)
+    cues: list[str] = []
+    if "dialog" in goal:
+        cues.extend(["ok", "cancel", "create", "name", "folder", "file"])
+    if "timer" in goal and ("setup" in goal or "set the timer" in goal or "+" in goal):
+        cues.extend(["00h 00m 00s", "0 hours", "timer_setup_digit"])
+    if "chrome" in goal and ("accept" in goal or "continue" in goal or "prompt" in goal):
+        cues.extend(["sign in", "no thanks", "turn sync", "search or type url"])
+    if "open the file" in goal or "task.html" in goal:
+        cues.extend(["open with", "chrome", "always", "just once"])
+    if "folder" in goal and ("create" in goal or "new" in goal):
+        cues.extend(["folder", "name", "create"])
+    return any(any(cue in label for cue in cues) for label in labels)
+
+
+def _has_transition_progress_evidence(request: VerifierRequest, evidence_observation: Dict[str, Any]) -> bool:
+    before = request.before_observation or {}
+    before_activity = str(before.get("current_activity") or "")
+    after_activity = str(evidence_observation.get("current_activity") or "")
+    before_foreground = _underlying_foreground_package(before)
+    after_foreground = _underlying_foreground_package(evidence_observation)
+    if before_activity != after_activity or before_foreground != after_foreground:
+        return True
+
+    before_desc = str(before.get("ui_description") or "")
+    after_desc = str(evidence_observation.get("ui_description") or "")
+    if before_desc != after_desc:
+        before_labels = set(_visible_labels(before))
+        after_labels = set(_visible_labels(evidence_observation))
+        if len(after_labels - before_labels) > 0:
+            return True
+
+    if _after_contains_goal_stage_cues(request, evidence_observation):
+        before_labels = set(_visible_labels(before))
+        after_labels = set(_visible_labels(evidence_observation))
+        if len(after_labels - before_labels) > 0:
+            return True
+    return False
 
 
 def _has_toggle_state_change(before: Dict[str, Any], after: Dict[str, Any]) -> bool:

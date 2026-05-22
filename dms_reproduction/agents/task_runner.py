@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 import re
 from typing import Any, Dict, List, Literal, Optional, Protocol
 
@@ -20,11 +21,14 @@ from dms_reproduction.agents.verifier import (
     VerifierResult,
 )
 from dms_reproduction.memory import (
+    DMSMemoryProvider,
     MemoryEvent,
     MemoryProvider,
     NoOpMemoryProvider,
     StaticMemoryRecord,
+    StaticMemoryProvider,
 )
+from dms_reproduction.llm.base_client import get_client_usage
 
 
 TaskRunStatus = Literal[
@@ -122,6 +126,7 @@ class TaskRunResult:
     final_task_success: bool | None = None
     total_actor_steps: int = 0
     completion_message: str = ""
+    memory_metrics: Dict[str, Any] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -133,6 +138,7 @@ class TaskRunResult:
             "final_task_success": self.final_task_success,
             "total_actor_steps": self.total_actor_steps,
             "completion_message": self.completion_message,
+            "memory_metrics": self.memory_metrics,
         }
 
 
@@ -169,6 +175,21 @@ class AndroidTaskRunner:
 
     def run_task(self, env: Any, task: Any, user_goal: str) -> TaskRunResult:
         self.memory_provider.reset()
+        memory_metrics_timeline: list[dict[str, Any]] = [self._snapshot_memory_metrics("run_start")]
+
+        def record_memory_metrics(stage: str) -> None:
+            memory_metrics_timeline.append(self._snapshot_memory_metrics(stage))
+
+        def finalize_result(result: TaskRunResult, *, round_id: int | None = None) -> TaskRunResult:
+            if round_id is not None:
+                round_stage = f"round_{round_id}_end"
+                if not memory_metrics_timeline or memory_metrics_timeline[-1].get("stage") != round_stage:
+                    record_memory_metrics(round_stage)
+            if not memory_metrics_timeline or memory_metrics_timeline[-1].get("stage") != "run_end":
+                record_memory_metrics("run_end")
+            result.memory_metrics = self._build_memory_metrics_summary(memory_metrics_timeline)
+            return result
+
         task.initialize_task(env)
         observation = self.observation_adapter.capture_observation(
             env,
@@ -205,7 +226,10 @@ class AndroidTaskRunner:
                 messages=planner_messages,
                 temperature=self.planner.config.temperature,
             )
-            planner_result = self.planner.parse_response(planner_raw_response)
+            planner_result = self.planner.parse_response(
+                planner_raw_response,
+                usage=get_client_usage(self.planner.llm_client),
+            )
             round_record = PlannerRoundRecord(
                 round_id=round_id,
                 input_observation=observation,
@@ -237,7 +261,7 @@ class AndroidTaskRunner:
                     ),
                 )
                 self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
-                return result
+                return finalize_result(result, round_id=round_id)
 
             round_record.planner_result = planner_result.to_dict()
 
@@ -253,7 +277,7 @@ class AndroidTaskRunner:
                         completion_message=planner_result.completion_message or "Task check passed.",
                     )
                     self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
-                    return result
+                    return finalize_result(result, round_id=round_id)
                 self._append_planner_feedback_history(
                     task_history=task_history,
                     round_id=round_id,
@@ -274,6 +298,7 @@ class AndroidTaskRunner:
                     observation=observation,
                 )
                 round_record.replan_reason = "planner_complete_but_task_check_failed"
+                record_memory_metrics(f"round_{round_id}_end")
                 continue
 
             subtasks = planner_result.subtasks
@@ -296,6 +321,7 @@ class AndroidTaskRunner:
                     summary=invalid_reason,
                     observation=observation,
                 )
+                record_memory_metrics(f"round_{round_id}_end")
                 continue
             planner_grounding_check = self._validate_planner_output_against_observation(
                 planner_result=planner_result,
@@ -325,6 +351,7 @@ class AndroidTaskRunner:
                     summary=reason_text,
                     observation=observation,
                 )
+                record_memory_metrics(f"round_{round_id}_end")
                 continue
 
             round_all_subtasks_succeeded = True
@@ -343,7 +370,7 @@ class AndroidTaskRunner:
                         ),
                     )
                     self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
-                    return result
+                    return finalize_result(result, round_id=round_id)
 
                 memory_read_result = self._build_actor_memory_result(
                     user_goal=user_goal,
@@ -473,7 +500,7 @@ class AndroidTaskRunner:
                         ),
                     )
                     self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
-                    return result
+                    return finalize_result(result, round_id=round_id)
                 if subtask_completed and self.config.stop_on_goal_complete and self._task_success_if_available(task, env):
                     result = TaskRunResult(
                         status="completed",
@@ -488,7 +515,7 @@ class AndroidTaskRunner:
                         ),
                     )
                     self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
-                    return result
+                    return finalize_result(result, round_id=round_id)
 
                 failure_reason = self._classify_actor_failure(actor_result)
 
@@ -516,7 +543,7 @@ class AndroidTaskRunner:
                         completion_message="Task check passed after completing the current planner round.",
                     )
                     self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=round_id)
-                    return result
+                    return finalize_result(result, round_id=round_id)
                 round_record.replan_reason = "round_subtasks_verified_but_task_incomplete"
                 self._append_planner_feedback_history(
                     task_history=task_history,
@@ -526,6 +553,7 @@ class AndroidTaskRunner:
                     summary="Use the current observation to generate the next 1-5 functional subtasks.",
                     observation=observation,
                 )
+                record_memory_metrics(f"round_{round_id}_end")
                 continue
 
         result = TaskRunResult(
@@ -537,7 +565,7 @@ class AndroidTaskRunner:
             completion_message=self._build_round_limit_message(planner_rounds, failure_pattern_counts),
         )
         self._emit_task_end_memory_event(user_goal=user_goal, result=result, round_id=len(planner_rounds))
-        return result
+        return finalize_result(result, round_id=len(planner_rounds))
 
     def _generate_stage_plan_record(self, *, user_goal: str, revision_reason: str | None = None) -> StagePlanRecord:
         planner_messages = self.planner.build_stage_plan_messages(user_goal=user_goal)
@@ -546,7 +574,10 @@ class AndroidTaskRunner:
             messages=planner_messages,
             temperature=self.planner.config.temperature,
         )
-        stage_plan_result = self.planner.parse_stage_plan_response(planner_raw_response)
+        stage_plan_result = self.planner.parse_stage_plan_response(
+            planner_raw_response,
+            usage=get_client_usage(self.planner.llm_client),
+        )
         return StagePlanRecord(
             planner_messages=self.planner.messages_to_jsonable(planner_messages),
             planner_prompt=planner_prompt,
@@ -658,6 +689,7 @@ class AndroidTaskRunner:
                     memory_eligible=(status == "success"),
                     raw_response="",
                     parse_error=None,
+                    usage=None,
                 ),
                 evidence_source,
             )
@@ -685,6 +717,7 @@ class AndroidTaskRunner:
             parse_error=None,
             prompt_text="",
             messages=[],
+            usage=None,
         )
 
     @staticmethod
@@ -722,6 +755,66 @@ class AndroidTaskRunner:
             return self.verifier.run_verification(verifier_request).to_dict()
 
         return _verify_step
+
+    def _snapshot_memory_metrics(self, stage: str) -> Dict[str, Any]:
+        provider = self.memory_provider
+        snapshot: Dict[str, Any] = {
+            "stage": stage,
+            "backend": "unknown",
+            "size_bytes": 0,
+            "entry_count": 0,
+        }
+        if isinstance(provider, NoOpMemoryProvider):
+            snapshot["backend"] = "none"
+            return snapshot
+        if isinstance(provider, StaticMemoryProvider):
+            snapshot["backend"] = "static"
+            store = getattr(provider, "store", None)
+            file_path = Path(provider.config.file_path)
+            snapshot["size_bytes"] = file_path.stat().st_size if file_path.exists() else 0
+            if store is not None and hasattr(store, "load_records"):
+                try:
+                    snapshot["entry_count"] = len(store.load_records())
+                except Exception:
+                    snapshot["entry_count"] = 0
+            return snapshot
+        if isinstance(provider, DMSMemoryProvider):
+            snapshot["backend"] = "dms"
+            stats = provider.store.stats()
+            snapshot["size_bytes"] = int(stats.get("memory_size_bytes", 0) or 0)
+            snapshot["entry_count"] = int(stats.get("total_count", 0) or 0)
+            snapshot["active_count"] = int(stats.get("active_count", 0) or 0)
+            snapshot["pruned_count"] = int(stats.get("pruned_count", 0) or 0)
+            snapshot["replaced_count"] = int(stats.get("replaced_count", 0) or 0)
+            snapshot["risky_count"] = int(stats.get("risky_count", 0) or 0)
+            return snapshot
+        return snapshot
+
+    @staticmethod
+    def _build_memory_metrics_summary(timeline: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not timeline:
+            return {
+                "backend": "unknown",
+                "start_size_bytes": 0,
+                "end_size_bytes": 0,
+                "delta_size_bytes": 0,
+                "start_entry_count": 0,
+                "end_entry_count": 0,
+                "delta_entry_count": 0,
+                "timeline": [],
+            }
+        start = timeline[0]
+        end = timeline[-1]
+        return {
+            "backend": end.get("backend") or start.get("backend") or "unknown",
+            "start_size_bytes": int(start.get("size_bytes", 0) or 0),
+            "end_size_bytes": int(end.get("size_bytes", 0) or 0),
+            "delta_size_bytes": int(end.get("size_bytes", 0) or 0) - int(start.get("size_bytes", 0) or 0),
+            "start_entry_count": int(start.get("entry_count", 0) or 0),
+            "end_entry_count": int(end.get("entry_count", 0) or 0),
+            "delta_entry_count": int(end.get("entry_count", 0) or 0) - int(start.get("entry_count", 0) or 0),
+            "timeline": timeline,
+        }
 
     @staticmethod
     def _append_actor_history(

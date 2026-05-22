@@ -25,6 +25,7 @@ class FakeLLMClient:
     def __init__(self, responses: list[str]) -> None:
         self.responses = list(responses)
         self.calls = []
+        self.last_usage = None
 
     def generate(self, messages, temperature: float = 0.0) -> str:
         self.calls.append({"messages": messages, "temperature": temperature})
@@ -53,6 +54,23 @@ class VerifierTest(unittest.TestCase):
         self.assertEqual(result.reason, "goal visible")
         self.assertTrue(result.memory_eligible)
         self.assertFalse(result.parse_error)
+
+    def test_usage_is_propagated_when_client_reports_it(self) -> None:
+        llm = FakeLLMClient(['{"status":"success","reason":"goal visible","memory_eligible":true}'])
+        llm.last_usage = {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+        verifier = AndroidVerifier(llm)
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: None Goal: Open Contacts",
+                action_history=[],
+                before_observation=build_observation("before"),
+                evidence_observation=build_observation("after"),
+                evidence_source="actor_completed_frame",
+            )
+        )
+
+        self.assertEqual(result.usage, {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18})
 
     def test_parses_failure_response(self) -> None:
         llm = FakeLLMClient(['{"status":"failure","reason":"wrong screen","memory_eligible":false}'])
@@ -233,6 +251,103 @@ class VerifierTest(unittest.TestCase):
         self.assertEqual(result.status, "failure")
         self.assertFalse(result.memory_eligible)
         self.assertIn("no post-action evidence", result.reason)
+
+    def test_local_veto_rejects_transition_success_when_button_only_remains_visible(self) -> None:
+        llm = FakeLLMClient(['{"status":"success","reason":"The Accept & continue button is visible and actionable.","memory_eligible":true}'])
+        verifier = AndroidVerifier(llm)
+
+        before = build_observation("chrome")
+        before["foreground_package"] = "com.android.chrome"
+        before["app_name"] = "com.android.chrome"
+        before["current_activity"] = "com.android.chrome/.FirstRunActivity"
+        before["ui_description"] = "Accept & continue button is visible."
+        before["ui_elements"] = [{"index": 0, "text": "Accept & continue", "is_clickable": True}]
+
+        after = build_observation("chrome")
+        after["foreground_package"] = "com.android.chrome"
+        after["app_name"] = "com.android.chrome"
+        after["current_activity"] = "com.android.chrome/.FirstRunActivity"
+        after["ui_description"] = "Accept & continue button is visible."
+        after["ui_elements"] = [{"index": 0, "text": "Accept & continue", "is_clickable": True}]
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: Chrome welcome screen is visible. Goal: Click the 'Accept & continue' button to proceed.",
+                action_history=[
+                    {"status": "progress", "reason": "The Accept & continue button is visible and actionable.", "action": {"action_type": "click", "index": 0}, "summary": "Tapped Accept & continue.", "error": ""}
+                ],
+                before_observation=before,
+                evidence_observation=after,
+                evidence_source="final_after_observation",
+            )
+        )
+
+        self.assertEqual(result.status, "failure")
+        self.assertIn("no post-action evidence", result.reason)
+
+    def test_navigation_success_kept_when_resulting_stage_evidence_appears(self) -> None:
+        llm = FakeLLMClient(['{"status":"success","reason":"Timer setup screen is visible.","memory_eligible":true}'])
+        verifier = AndroidVerifier(llm)
+
+        before = build_observation("clock")
+        before["foreground_package"] = "com.google.android.deskclock"
+        before["app_name"] = "com.google.android.deskclock"
+        before["current_activity"] = "com.google.android.deskclock/.DeskClock"
+        before["ui_description"] = "Timer tab with add button."
+        before["ui_elements"] = [
+            {"index": 1, "text": "Timer", "is_clickable": True},
+            {"index": 2, "content_description": "Add city", "resource_name": "com.google.android.deskclock:id/fab", "is_clickable": True},
+        ]
+
+        after = build_observation("clock")
+        after["foreground_package"] = "com.google.android.deskclock"
+        after["app_name"] = "com.google.android.deskclock"
+        after["current_activity"] = "com.google.android.deskclock/.DeskClock"
+        after["ui_description"] = "Timer setup screen with digits."
+        after["ui_elements"] = [
+            {"index": 2, "text": "00h 00m 00s", "content_description": "0 hours, 0 minutes, 0 seconds", "is_clickable": False},
+            {"index": 3, "text": "1", "resource_name": "com.google.android.deskclock:id/timer_setup_digit_1", "is_clickable": True},
+        ]
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: The Timer tab is active. Goal: Click the '+' button to start the timer setup process.",
+                action_history=[
+                    {"status": "progress", "reason": "The '+' button is visible and needs to be clicked to start the timer setup process.", "action": {"action_type": "click", "index": 2}, "summary": "Tapped the add button.", "error": ""}
+                ],
+                before_observation=before,
+                evidence_observation=after,
+                evidence_source="final_after_observation",
+            )
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertTrue(result.memory_eligible)
+
+    def test_form_fill_enter_name_is_not_misclassified_as_navigation(self) -> None:
+        llm = FakeLLMClient(['{"status":"success","reason":"The name field contains the requested value.","memory_eligible":true}'])
+        verifier = AndroidVerifier(llm)
+
+        before = build_observation("markor")
+        before["ui_description"] = "New file dialog with empty name field."
+        before["ui_elements"] = [{"index": 1, "text": "", "content_description": "Name", "is_clickable": True}]
+        after = build_observation("markor")
+        after["ui_description"] = "New file dialog with populated name field."
+        after["ui_elements"] = [{"index": 1, "text": "folder_20260521_230655", "content_description": "Name", "is_clickable": True}]
+
+        result = verifier.run_verification(
+            VerifierRequest(
+                subtask="Precondition: The new folder creation dialog is open. Goal: Enter 'folder_20260521_230655' in the folder name field.",
+                action_history=[
+                    {"status": "progress", "reason": "The goal is to enter the folder name in the name field.", "action": {"action_type": "input_text", "index": 1, "text": "folder_20260521_230655"}, "summary": "Entered the folder name.", "error": ""}
+                ],
+                before_observation=before,
+                evidence_observation=after,
+                evidence_source="final_after_observation",
+            )
+        )
+
+        self.assertEqual(result.status, "success")
 
     def test_local_veto_rejects_toggle_success_without_checked_state_change(self) -> None:
         llm = FakeLLMClient(['{"verified_success":true,"reason":"the switch was clicked","memory_eligible":true}'])

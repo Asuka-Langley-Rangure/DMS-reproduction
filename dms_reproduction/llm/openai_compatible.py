@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from dms_reproduction.llm.base_client import OpenAICompatibleConfig
+from dms_reproduction.llm.base_client import LLMUsage, OpenAICompatibleConfig, normalize_usage
 
 
 class OpenAICompatibleClient:
@@ -12,6 +12,7 @@ class OpenAICompatibleClient:
 
     def __init__(self, config: OpenAICompatibleConfig) -> None:
         self.config = config
+        self.last_usage: LLMUsage | None = None
 
     def generate(self, messages: List[Dict[str, Any]], temperature: float = 0.0) -> str:
         url = self.config.base_url.rstrip("/") + "/chat/completions"
@@ -39,9 +40,15 @@ class OpenAICompatibleClient:
             )
 
         data = response.json()
+        self.last_usage = normalize_usage(data.get("usage"))
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(
                 f"Malformed OpenAI-compatible response: {str(data)[:500]}"
             ) from exc
+
+    def get_last_usage(self) -> LLMUsage | None:
+        if self.last_usage is None:
+            return None
+        return dict(self.last_usage)

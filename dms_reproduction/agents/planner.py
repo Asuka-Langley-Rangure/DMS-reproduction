@@ -5,6 +5,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Protocol
 
+from dms_reproduction.llm.base_client import LLMUsage, get_client_usage
+
 
 @dataclass
 class PlannerSubtask:
@@ -50,6 +52,7 @@ class PlannerResult:
     parse_error_code: Optional[str] = None
     repaired_parse: bool = False
     repair_reason: Optional[str] = None
+    usage: LLMUsage | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,6 +67,7 @@ class PlannerResult:
             "parse_error_code": self.parse_error_code,
             "repaired_parse": self.repaired_parse,
             "repair_reason": self.repair_reason,
+            "usage": self.usage,
         }
 
 
@@ -74,6 +78,7 @@ class StagePlanResult:
     parse_error: Optional[str] = None
     repaired_parse: bool = False
     repair_reason: Optional[str] = None
+    usage: LLMUsage | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -82,6 +87,7 @@ class StagePlanResult:
             "parse_error": self.parse_error,
             "repaired_parse": self.repaired_parse,
             "repair_reason": self.repair_reason,
+            "usage": self.usage,
         }
 
 
@@ -134,7 +140,10 @@ class AndroidTaskPlanner:
             messages=messages,
             temperature=self.config.temperature,
         )
-        return self.parse_stage_plan_response(raw_response)
+        return self.parse_stage_plan_response(
+            raw_response,
+            usage=get_client_usage(self.llm_client),
+        )
 
     def plan_current_subtasks(
         self,
@@ -156,7 +165,10 @@ class AndroidTaskPlanner:
             messages=messages,
             temperature=self.config.temperature,
         )
-        return self.parse_response(raw_response)
+        return self.parse_response(
+            raw_response,
+            usage=get_client_usage(self.llm_client),
+        )
 
     def build_stage_plan_messages(self, user_goal: str) -> List[Dict[str, Any]]:
         return [
@@ -227,7 +239,7 @@ class AndroidTaskPlanner:
                         return str(item.get("text", ""))
         return ""
 
-    def parse_response(self, raw_response: str) -> PlannerResult:
+    def parse_response(self, raw_response: str, usage: LLMUsage | None = None) -> PlannerResult:
         payload = extract_json_object(raw_response)
         repaired_parse = False
         repair_reason: str | None = None
@@ -239,6 +251,7 @@ class AndroidTaskPlanner:
                     raw_response=raw_response,
                     parse_error="Failed to parse planner JSON.",
                     parse_error_code="planner_json_parse_failed",
+                    usage=usage,
                 )
             payload = repaired_payload
             repaired_parse = True
@@ -254,6 +267,7 @@ class AndroidTaskPlanner:
                     parse_error_code="planner_stage_plan_invalid",
                     repaired_parse=repaired_parse,
                     repair_reason=repair_reason,
+                    usage=usage,
                 )
             return PlannerResult(
                 is_goal_complete=True,
@@ -264,6 +278,7 @@ class AndroidTaskPlanner:
                 raw_response=raw_response,
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
 
         if tool not in {"set_tasks", "set_tasks_with_agents"}:
@@ -274,6 +289,7 @@ class AndroidTaskPlanner:
                 parse_error_code="planner_tool_unsupported",
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
 
         tasks = payload.get("tasks")
@@ -288,6 +304,7 @@ class AndroidTaskPlanner:
                 parse_error_code="planner_stage_plan_invalid",
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
         if not isinstance(tasks, list) or not tasks:
             synthesized_subtask = synthesize_subtask_from_stage_plan(
@@ -303,6 +320,7 @@ class AndroidTaskPlanner:
                     parse_error_code="planner_tasks_missing",
                     repaired_parse=repaired_parse,
                     repair_reason=repair_reason,
+                    usage=usage,
                 )
             return PlannerResult(
                 is_goal_complete=False,
@@ -313,6 +331,7 @@ class AndroidTaskPlanner:
                 raw_response=raw_response,
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
 
         subtasks: list[PlannerSubtask] = []
@@ -325,6 +344,7 @@ class AndroidTaskPlanner:
                     parse_error_code="planner_task_invalid",
                     repaired_parse=repaired_parse,
                     repair_reason=repair_reason,
+                    usage=usage,
                 )
 
             task_text = coerce_task_text(item)
@@ -337,6 +357,7 @@ class AndroidTaskPlanner:
                     parse_error_code="planner_task_invalid",
                     repaired_parse=repaired_parse,
                     repair_reason=repair_reason,
+                    usage=usage,
                 )
             if not isinstance(reason, str) or not reason.strip():
                 return PlannerResult(
@@ -346,6 +367,7 @@ class AndroidTaskPlanner:
                     parse_error_code="planner_task_invalid",
                     repaired_parse=repaired_parse,
                     repair_reason=repair_reason,
+                    usage=usage,
                 )
 
             parsed = parse_precondition_goal(task_text)
@@ -362,6 +384,7 @@ class AndroidTaskPlanner:
                         parse_error_code="planner_task_format_invalid",
                         repaired_parse=repaired_parse,
                         repair_reason=repair_reason,
+                        usage=usage,
                     )
                 parsed = parse_precondition_goal(repaired_task_text)
                 if parsed is None:
@@ -375,6 +398,7 @@ class AndroidTaskPlanner:
                         parse_error_code="planner_task_format_invalid",
                         repaired_parse=repaired_parse,
                         repair_reason=repair_reason,
+                        usage=usage,
                     )
                 repaired_parse = True
                 if repair_reason is None:
@@ -407,6 +431,7 @@ class AndroidTaskPlanner:
                 parse_error_code="planner_stage_subtask_misaligned",
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
 
         return PlannerResult(
@@ -418,9 +443,10 @@ class AndroidTaskPlanner:
             raw_response=raw_response,
             repaired_parse=repaired_parse,
             repair_reason=repair_reason,
+            usage=usage,
         )
 
-    def parse_stage_plan_response(self, raw_response: str) -> StagePlanResult:
+    def parse_stage_plan_response(self, raw_response: str, usage: LLMUsage | None = None) -> StagePlanResult:
         payload: dict[str, Any] | None = None
         stripped = raw_response.strip()
         if stripped.startswith("[") or stripped.startswith("```json\n[") or stripped.startswith("```\n["):
@@ -439,6 +465,7 @@ class AndroidTaskPlanner:
             return StagePlanResult(
                 raw_response=raw_response,
                 parse_error="Failed to parse planner stage-plan JSON.",
+                usage=usage,
             )
         stage_plan, current_stage_id, covered_stage_ids, stage_error = parse_stage_plan_payload(payload)
         if stage_error is not None:
@@ -447,6 +474,7 @@ class AndroidTaskPlanner:
                 parse_error=stage_error,
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
         if current_stage_id is not None:
             return StagePlanResult(
@@ -454,6 +482,7 @@ class AndroidTaskPlanner:
                 parse_error="Initial stage-plan generation must not include current_stage_id.",
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
         if covered_stage_ids:
             return StagePlanResult(
@@ -461,6 +490,7 @@ class AndroidTaskPlanner:
                 parse_error="Initial stage-plan generation must not include covered_stage_ids.",
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
         if not 3 <= len(stage_plan) <= 5:
             return StagePlanResult(
@@ -468,12 +498,14 @@ class AndroidTaskPlanner:
                 parse_error="Initial stage_plan must contain 3-5 milestones.",
                 repaired_parse=repaired_parse,
                 repair_reason=repair_reason,
+                usage=usage,
             )
         return StagePlanResult(
             stage_plan=stage_plan,
             raw_response=raw_response,
             repaired_parse=repaired_parse,
             repair_reason=repair_reason,
+            usage=usage,
         )
 
     def _build_system_prompt(self) -> str:
@@ -886,7 +918,20 @@ class AndroidTaskPlanner:
             f"Complete task history:\n{history_text}\n\n"
             "Retrieved memory context:\n"
             f"{memory_text if memory_text else 'None'}\n\n"
-            f"{task_type_hint}"
+            f"{task_type_hint}\n\n"
+            "Known installed AndroidWorld apps:\n"
+            "- Pro Expense: package com.arduia.expense. Use this app for all Expense* tasks.\n"
+            "- Markor: package net.gsantner.markor. Use this app for all Markor* tasks.\n"
+            "- Audio Recorder: package com.dimowner.audiorecorder. Use this app for all AudioRecorder* tasks.\n"
+            "- Contacts: package com.google.android.contacts.\n"
+            "- Calendar: package com.google.android.calendar.\n"
+            "- Clock: package com.google.android.deskclock.\n"
+            "- Messages/SMS: package com.google.android.apps.messaging.\n"
+            "- Settings: package com.android.settings.\n"
+            "Important:\n"
+            "- These apps are already installed in the emulator.\n"
+            "- Do NOT open Google Play Store to search for or install task apps.\n"
+            "- For ExpenseAddSingle, the target app is Pro Expense, package com.arduia.expense.\n\n"
             "Planning instruction:\n"
             "- Return a sequential plan of 1-5 functional subtasks.\n"
             "- Use the current screen to ground the first subtask.\n"

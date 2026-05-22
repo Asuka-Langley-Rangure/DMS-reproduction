@@ -183,6 +183,7 @@ def build_actor_step(step_id: int, reason: str, action, status: str, done: bool)
         raw_response="raw",
         parse_error=None,
         execution_error=None,
+        usage=None,
         step_verification_triggered=False,
         step_verification=None,
         step_verification_reason=None,
@@ -299,17 +300,19 @@ class FakePlanner:
         self._last_response = response.raw_response or '{"tool":"stub"}'
         return self._last_response
 
-    def parse_response(self, raw_response: str) -> PlannerResult:
+    def parse_response(self, raw_response: str, usage=None) -> PlannerResult:
         response = self.responses.pop(0)
         response.raw_response = raw_response
+        response.usage = usage
         return response
 
-    def parse_stage_plan_response(self, raw_response: str) -> StagePlanResult:
+    def parse_stage_plan_response(self, raw_response: str, usage=None) -> StagePlanResult:
         if self.stage_plan_results:
             response = self.stage_plan_results.pop(0)
         else:
             response = self._default_stage_plan_result()
         response.raw_response = raw_response
+        response.usage = usage
         return response
 
 class FakeActor:
@@ -431,6 +434,7 @@ class FakeVerifier:
             parse_error=payload.get("parse_error"),
             prompt_text="verifier prompt",
             messages=[{"role": "user", "content": "verifier prompt"}],
+            usage=payload.get("usage"),
         )
 
 

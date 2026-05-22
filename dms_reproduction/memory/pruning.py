@@ -21,17 +21,17 @@ class PruningConfig:
     enabled: bool = True
 
     # When to run pruning
-    prune_interval_steps: int = 5
-    capacity_min: int = 5
-    capacity_max: int = 20
+    prune_interval_steps: int = 10
+    capacity_min: int = 50
+    capacity_max: int = 150
     capacity_expand_step: int = 50
 
     # Hard rules
-    strike_limit: int = 2
+    strike_limit: int = 3
     min_survival_value: Optional[float] = None
 
     # Recent memory protection
-    protect_recent_steps: int = 1
+    protect_recent_steps: int = 3
 
     # Capacity pruning
     use_elbow: bool = True

@@ -367,6 +367,58 @@ def analyze_raw_planner_output(round_record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def format_usage(usage: dict[str, Any] | None) -> str:
+    if not usage:
+        return "None"
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    total = usage.get("total_tokens")
+    return f"prompt={prompt if prompt is not None else 'None'}, completion={completion if completion is not None else 'None'}, total={total if total is not None else 'None'}"
+
+
+def add_usage_totals(*totals: dict[str, int], usage: dict[str, Any] | None) -> None:
+    if not usage:
+        return
+    for total_map in totals:
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key)
+            if value is not None:
+                total_map[key] += int(value)
+
+
+def compute_run_token_totals(run_result: dict[str, Any]) -> dict[str, int]:
+    planner_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    actor_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    verifier_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for round_record in run_result.get("planner_rounds", []):
+        add_usage_totals(planner_totals, usage=(round_record.get("planner_result") or {}).get("usage"))
+        for subtask_run in round_record.get("subtask_runs", []):
+            if not isinstance(subtask_run, dict):
+                continue
+            actor_result = subtask_run.get("actor_result") or {}
+            for source_key, total_key in (
+                ("prompt_tokens_total", "prompt_tokens"),
+                ("completion_tokens_total", "completion_tokens"),
+                ("total_tokens_total", "total_tokens"),
+            ):
+                value = actor_result.get(source_key)
+                if value is not None:
+                    actor_totals[total_key] += int(value)
+            add_usage_totals(verifier_totals, usage=(subtask_run.get("subtask_verification") or {}).get("usage"))
+    return {
+        "planner_tokens_total": planner_totals["total_tokens"],
+        "actor_tokens_total": actor_totals["total_tokens"],
+        "verifier_tokens_total": verifier_totals["total_tokens"],
+        "tokens_total": planner_totals["total_tokens"] + actor_totals["total_tokens"] + verifier_totals["total_tokens"],
+        "planner_prompt_tokens_total": planner_totals["prompt_tokens"],
+        "planner_completion_tokens_total": planner_totals["completion_tokens"],
+        "actor_prompt_tokens_total": actor_totals["prompt_tokens"],
+        "actor_completion_tokens_total": actor_totals["completion_tokens"],
+        "verifier_prompt_tokens_total": verifier_totals["prompt_tokens"],
+        "verifier_completion_tokens_total": verifier_totals["completion_tokens"],
+    }
+
+
 def build_round_summary(round_record: dict[str, Any]) -> str:
     planner_result = round_record["planner_result"]
     stage_plan = planner_result.get("stage_plan") or []
@@ -389,6 +441,7 @@ def build_round_summary(round_record: dict[str, Any]) -> str:
             f"- Raw atomic UI action: {raw_quality.get('raw_subtask_is_atomic_ui_action')}",
             f"- Raw grouped form fill: {raw_quality.get('raw_subtask_is_grouped_form_fill')}",
             f"- Raw complete_goal declared: {raw_quality.get('raw_complete_goal_declared')}",
+            f"- Planner token usage: {format_usage(planner_result.get('usage'))}",
         ]
     )
     normalized_subtasks = round_record.get("normalized_subtasks") or []
@@ -466,14 +519,18 @@ def build_round_subtask_outcome_lines(subtask_runs: list[dict[str, Any]]) -> lis
                 f"- Actor completion message: {actor_result.get('completion_message') or 'None'}",
                 f"- Actor final action: {json.dumps(final_action, ensure_ascii=False) if final_action else 'None'}",
                 f"- Actor final reason: {final_reason}",
+                f"- Actor token usage: {format_usage({'prompt_tokens': actor_result.get('prompt_tokens_total'), 'completion_tokens': actor_result.get('completion_tokens_total'), 'total_tokens': actor_result.get('total_tokens_total')})}",
                 f"- Verifier status: {verification.get('status') or 'None'}",
                 f"- Verifier reason: {verification.get('reason') or 'None'}",
+                f"- Verifier token usage: {format_usage(verification.get('usage'))}",
             ]
         )
     return lines
 
 
 def build_run_summary(task: str, goal: str, run_result: dict[str, Any], memory_backend: str) -> str:
+    token_totals = compute_run_token_totals(run_result)
+    memory_metrics = run_result.get("memory_metrics") or {}
     failure_counts = {
         "invalid_index": 0,
         "unstable_observation": 0,
@@ -531,6 +588,10 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any], memory_b
         f"- Planner rounds: {len(run_result.get('planner_rounds', []))}",
         f"- Total actor steps: {run_result.get('total_actor_steps', 0)}",
         f"- Stage plan revisions: {len(run_result.get('stage_plan_revisions') or [])}",
+        f"- Planner tokens total: {token_totals['planner_tokens_total']}",
+        f"- Actor tokens total: {token_totals['actor_tokens_total']}",
+        f"- Verifier tokens total: {token_totals['verifier_tokens_total']}",
+        f"- Overall tokens total: {token_totals['tokens_total']}",
         "",
         "## Initial Stage Plan",
     ]
@@ -543,6 +604,17 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any], memory_b
             )
     else:
         lines.append("- None")
+    lines.extend(
+        [
+            "",
+            "## Memory Metrics",
+            f"- Backend: {memory_metrics.get('backend') or memory_backend}",
+            f"- Start size bytes: {memory_metrics.get('start_size_bytes', 0)}",
+            f"- End size bytes: {memory_metrics.get('end_size_bytes', 0)}",
+            f"- Delta size bytes: {memory_metrics.get('delta_size_bytes', 0)}",
+            f"- End entry count: {memory_metrics.get('end_entry_count', 0)}",
+        ]
+    )
     lines.extend(
         [
             "",
@@ -576,6 +648,7 @@ def build_run_summary(task: str, goal: str, run_result: dict[str, Any], memory_b
 
 
 def build_light_run_result(run_result: dict[str, Any], artifact_index: dict[str, Any]) -> dict[str, Any]:
+    token_totals = compute_run_token_totals(run_result)
     return {
         "status": run_result.get("status"),
         "final_task_success": run_result.get("final_task_success"),
@@ -583,6 +656,8 @@ def build_light_run_result(run_result: dict[str, Any], artifact_index: dict[str,
         "completion_message": run_result.get("completion_message"),
         "planner_round_count": len(run_result.get("planner_rounds", [])),
         "stage_plan_revision_count": len(run_result.get("stage_plan_revisions") or []),
+        **token_totals,
+        "memory_metrics": run_result.get("memory_metrics"),
         "artifact_index": artifact_index,
     }
 
@@ -902,6 +977,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         for round_record in run_result_dict["planner_rounds"]:
             artifact_index["rounds"].append(write_round_artifacts(run_dir, round_record))
         save_json(run_dir / "artifact_index.json", artifact_index)
+        save_json(run_dir / "memory_metrics.json", run_result_dict.get("memory_metrics") or {})
         save_json(run_dir / "run_result.json", build_light_run_result(run_result_dict, artifact_index))
         save_text(
             run_dir / "run_summary.md",

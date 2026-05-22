@@ -193,6 +193,8 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Return exactly one action in the required JSON action format", user_prompt)
         self.assertEqual(system_prompt.count("Never output action_type 'type'. Use action_type 'input_text' for entering text."), 1)
         self.assertEqual(system_prompt.count("Do not only click the field unless the Goal is only to focus/select the field."), 1)
+        self.assertEqual(system_prompt.count("If the Goal mentions +, add, create, or new, ground to the visible create-entry control, FAB, or button whose label or content description indicates creation."), 1)
+        self.assertIn("Do not infer an index for a + icon from the screenshot if the visible UI table already exposes a create-entry control.", system_prompt)
         self.assertNotIn("Visible UI elements JSON", user_prompt)
 
     def test_prompt_includes_observation_warning(self) -> None:
@@ -241,6 +243,7 @@ class ActorPromptTest(unittest.TestCase):
         self.assertIn("Do not click Save, Done, Apply, or Submit until every required field matches the expected value", user_prompt)
         self.assertIn("\"first_name\": 5", user_prompt)
         self.assertIn("Never output action_type 'type'. Use action_type 'input_text' for entering text.", system_prompt)
+        self.assertIn("If the Goal mentions +, add, create, or new, ground to the visible create-entry control, FAB, or button whose label or content description indicates creation.", system_prompt)
 
     def test_generic_prompt_ignores_contact_form_specific_block(self) -> None:
         llm = FakeLLMClient(['Reason: fill a field.\nAction: {"action_type":"input_text","index":5,"text":"Mia"}'])
@@ -599,6 +602,90 @@ class ActorActionParsingTest(unittest.TestCase):
         self.assertEqual(action.y, 860)
         self.assertEqual(corrected, {"action_type": "click", "x": 320, "y": 860})
         self.assertIn("unique exact visible label match among multiple non-clickable matches", correction_reason or "")
+
+    def test_corrects_plus_button_goal_to_unique_clickable_create_entry(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 1,
+                "text": None,
+                "content_description": "Create a new file or folder",
+                "resource_name": "net.gsantner.markor:id/fab_add_new_item",
+                "is_clickable": True,
+                "is_editable": False,
+            },
+            {
+                "index": 4,
+                "text": "Search",
+                "content_description": "Search",
+                "resource_name": "net.gsantner.markor:id/action_search",
+                "is_clickable": True,
+                "is_editable": False,
+            },
+        ]
+        observation["valid_ui_indices"] = [1, 4]
+        action, _, _, _, corrected, correction_reason = parse_actor_action(
+            {"action_type": "click", "index": 16},
+            observation,
+            reason="The + button should open the create flow for a new note.",
+            subtask="Precondition: Markor is open. Goal: Click the '+' button to create a new note.",
+        )
+        self.assertIsInstance(action, ClickAction)
+        self.assertEqual(action.index, 1)
+        self.assertEqual(corrected, {"action_type": "click", "index": 1})
+        self.assertIn("Corrected click target", correction_reason or "")
+
+    def test_create_entry_aliases_match_content_description_and_resource_name(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 1,
+                "text": None,
+                "content_description": "Create a new file or folder",
+                "resource_name": "net.gsantner.markor:id/fab_add_new_item",
+                "is_clickable": True,
+                "is_editable": False,
+            }
+        ]
+        observation["valid_ui_indices"] = [1]
+        for token in ("+", "create", "add", "new", "fab"):
+            action, _, _, _, corrected, _ = parse_actor_action(
+                {"action_type": "click", "index": 99},
+                observation,
+                reason=f"The {token} control is visible and should be used.",
+                subtask=f"Precondition: Markor is open. Goal: Tap the {token} button.",
+            )
+            self.assertEqual(action.index, 1)
+            self.assertEqual(corrected, {"action_type": "click", "index": 1})
+
+    def test_multiple_create_like_entries_without_unique_safe_target_are_not_corrected(self) -> None:
+        observation = build_observation()
+        observation["ui_elements"] = [
+            {
+                "index": 1,
+                "text": None,
+                "content_description": "Create a new file or folder",
+                "resource_name": "net.gsantner.markor:id/fab_add_new_item",
+                "is_clickable": True,
+                "is_editable": False,
+            },
+            {
+                "index": 2,
+                "text": "Create",
+                "content_description": "Create",
+                "resource_name": "net.gsantner.markor:id/action_create",
+                "is_clickable": True,
+                "is_editable": False,
+            },
+        ]
+        observation["valid_ui_indices"] = [1, 2]
+        with self.assertRaisesRegex(ValueError, "valid_ui_indices"):
+            parse_actor_action(
+                {"action_type": "click", "index": 99},
+                observation,
+                reason="The + button should open the create flow for a new note.",
+                subtask="Precondition: Markor is open. Goal: Click the '+' button to create a new note.",
+            )
 
     def test_multiple_semantic_matches_without_unique_safe_target_are_not_corrected(self) -> None:
         observation = build_observation()

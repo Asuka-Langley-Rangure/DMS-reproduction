@@ -73,6 +73,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                 "planner_raw_response": '{"tool":"set_tasks"}',
                 "planner_result": {
                     "is_goal_complete": False,
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
                     "completion_message": "",
                     "stage_plan": [
                         {
@@ -107,6 +108,9 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                         "actor_result": {
                             "status": "completed",
                             "completion_message": "done",
+                            "prompt_tokens_total": 8,
+                            "completion_tokens_total": 4,
+                            "total_tokens_total": 12,
                             "steps": [
                                 {
                                     "step_id": 0,
@@ -133,6 +137,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                                     "done_reason": "completed",
                                     "parse_error": None,
                                     "execution_error": None,
+                                    "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
                                 }
                             ],
                         },
@@ -155,6 +160,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                             "parse_error": None,
                             "prompt_text": "verifier prompt",
                             "messages": [{"role": "user", "content": "verifier prompt"}],
+                            "usage": {"prompt_tokens": 6, "completion_tokens": 2, "total_tokens": 8},
                         },
                         "post_observation": {
                             **build_observation("after"),
@@ -168,6 +174,13 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                     }
                 ],
                 "replan_reason": "subtasks_exhausted",
+                "memory_metrics": {
+                    "backend": "none",
+                    "start_size_bytes": 0,
+                    "end_size_bytes": 0,
+                    "delta_size_bytes": 0,
+                    "end_entry_count": 0,
+                },
             }
 
             initial_index = write_initial_stage_plan_artifacts(run_dir, initial_stage_plan)
@@ -227,6 +240,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
             "final_task_success": None,
             "total_actor_steps": 3,
             "completion_message": "Round limit reached.",
+            "memory_metrics": {"backend": "none", "start_size_bytes": 0, "end_size_bytes": 0, "delta_size_bytes": 0},
         }
         artifact_index = {"rounds": [{"round_dir": "x"}]}
 
@@ -235,6 +249,8 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
         self.assertNotIn("planner_rounds", light_result)
         self.assertEqual(light_result["artifact_index"], artifact_index)
         self.assertEqual(light_result["planner_round_count"], 1)
+        self.assertIn("tokens_total", light_result)
+        self.assertIn("memory_metrics", light_result)
 
     def test_build_run_summary_is_readable(self) -> None:
         summary = build_run_summary(
@@ -243,15 +259,19 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
             {
                 "status": "round_limit",
                 "completion_message": "Round limit reached.",
-                "planner_rounds": [{"round_id": 1, "replan_reason": "x", "subtask_runs": [1]}],
+                "planner_rounds": [{"round_id": 1, "replan_reason": "x", "subtask_runs": [1], "planner_result": {"usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}}}],
                 "total_actor_steps": 2,
+                "memory_metrics": {"backend": "none", "start_size_bytes": 0, "end_size_bytes": 0, "delta_size_bytes": 0, "end_entry_count": 0},
             },
+            "none",
         )
 
         self.assertIn("# Run Summary", summary)
         self.assertIn("ContactsAddContact", summary)
         self.assertIn("replan_reason=x", summary)
         self.assertIn("group_form_subtask_used", summary)
+        self.assertIn("Overall tokens total", summary)
+        self.assertIn("## Memory Metrics", summary)
 
     def test_build_round_summary_includes_subtask_actor_and_verifier_outcomes(self) -> None:
         summary = build_round_summary(
@@ -260,6 +280,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                 "planner_raw_response": '{"tool":"set_tasks"}',
                 "planner_result": {
                     "is_goal_complete": False,
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
                     "subtasks": [
                         {
                             "precondition": "Home screen is visible",
@@ -277,11 +298,15 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                         "actor_result": {
                             "status": "stopped",
                             "completion_message": "Stop for external verification.",
+                            "prompt_tokens_total": 5,
+                            "completion_tokens_total": 2,
+                            "total_tokens_total": 7,
                             "steps": [
                                 {
                                     "step_id": 0,
                                     "reason": "Settings is visible in the app drawer.",
                                     "action": {"action_type": "click", "index": 17},
+                                    "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
                                 }
                             ],
                         },
@@ -289,6 +314,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                             "status": "uncertain",
                             "reason": "Settings is visible, but the Settings app is not yet open.",
                             "memory_eligible": False,
+                            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
                         },
                     }
                 ],
@@ -303,6 +329,9 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
         self.assertIn("Actor final reason: Settings is visible in the app drawer.", summary)
         self.assertIn("Verifier status: uncertain", summary)
         self.assertIn("Verifier reason: Settings is visible, but the Settings app is not yet open.", summary)
+        self.assertIn("Planner token usage: prompt=4, completion=2, total=6", summary)
+        self.assertIn("Actor token usage: prompt=5, completion=2, total=7", summary)
+        self.assertIn("Verifier token usage: prompt=2, completion=1, total=3", summary)
 
     def test_build_round_summary_handles_empty_steps_and_missing_verifier(self) -> None:
         summary = build_round_summary(
@@ -311,6 +340,7 @@ class TaskLoopSmokeArtifactsTest(unittest.TestCase):
                 "planner_raw_response": '{"tool":"set_tasks"}',
                 "planner_result": {
                     "is_goal_complete": False,
+                    "usage": None,
                     "subtasks": [
                         {
                             "precondition": "Launcher is visible",

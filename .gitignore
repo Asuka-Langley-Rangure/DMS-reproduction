@@ -9,3 +9,4 @@ zero_shot_runs/
 pipeline.md
 memory_bank/
 task_loop_smoke_runs_history/
+batch_results/

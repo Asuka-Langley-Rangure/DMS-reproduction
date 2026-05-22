@@ -16,6 +16,7 @@ class FakeLLMClient:
         self.response = response
         self.messages = None
         self.temperature = None
+        self.last_usage = None
 
     def generate(self, messages, temperature: float = 0.0) -> str:
         self.messages = messages
@@ -53,6 +54,15 @@ class PlannerPromptTest(unittest.TestCase):
         self.assertNotIn("Current device state", user_prompt)
         self.assertNotIn("Visible UI elements JSON", user_prompt)
         self.assertNotIn("Complete task history", user_prompt)
+
+    def test_stage_plan_usage_is_propagated_when_client_reports_it(self) -> None:
+        llm = FakeLLMClient(response='{"stage_plan":[{"stage_id":1,"title":"Open the target app","success_signal":"App is open"},{"stage_id":2,"title":"Reach the working area","success_signal":"Working area is visible"},{"stage_id":3,"title":"Complete the requested action","success_signal":"Requested action is completed"}]}')
+        llm.last_usage = {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18}
+        planner = AndroidTaskPlanner(llm, PlannerConfig(max_subtasks=5, prompt_profile="generic_paper"))
+
+        result = planner.plan_stage_milestones("Delete target_file.mp3 from the device")
+
+        self.assertEqual(result.usage, {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18})
 
     def test_prompt_contains_required_sections_and_omits_agent_list(self) -> None:
         llm = FakeLLMClient(response='{"tool":"complete_goal","message":"done"}')

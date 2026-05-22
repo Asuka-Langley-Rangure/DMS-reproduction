@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Literal, Optional, Protocol
 
+from dms_reproduction.llm.base_client import LLMUsage, get_client_usage, sum_usages
+
 try:
     from android_world.env import json_action
 except ImportError:  # pragma: no cover - fallback for local package layout
@@ -171,6 +173,7 @@ class ActorStepResult:
     messages: List[Dict[str, Any]]
     prompt_text: str
     raw_response: str
+    usage: LLMUsage | None
     parse_error: str | None
     execution_error: str | None
     step_verification_triggered: bool = False
@@ -198,6 +201,7 @@ class ActorStepResult:
             "messages": self.messages,
             "prompt_text": self.prompt_text,
             "raw_response": self.raw_response,
+            "usage": self.usage,
             "parse_error": self.parse_error,
             "execution_error": self.execution_error,
             "step_verification_triggered": self.step_verification_triggered,
@@ -232,6 +236,9 @@ class ActorRunResult:
     completion_message: str = ""
     answer_text: str = ""
     last_action: Dict[str, Any] | None = None
+    prompt_tokens_total: int | None = None
+    completion_tokens_total: int | None = None
+    total_tokens_total: int | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -241,6 +248,9 @@ class ActorRunResult:
             "completion_message": self.completion_message,
             "answer_text": self.answer_text,
             "last_action": self.last_action,
+            "prompt_tokens_total": self.prompt_tokens_total,
+            "completion_tokens_total": self.completion_tokens_total,
+            "total_tokens_total": self.total_tokens_total,
         }
 
 
@@ -345,6 +355,25 @@ class AndroidActor:
         recent_editable_index: int | None = None
         direct_open_action = self._maybe_plan_direct_open_app_action(request.subtask, current_observation)
 
+        def build_run_result(
+            *,
+            status: ActorStatus,
+            completion_message: str = "",
+            last_action: Dict[str, Any] | None = None,
+        ) -> ActorRunResult:
+            usage_totals = sum_usages([step.usage for step in steps])
+            return ActorRunResult(
+                status=status,
+                steps=steps,
+                final_observation=current_observation,
+                completion_message=completion_message,
+                answer_text=answer_text,
+                last_action=last_action,
+                prompt_tokens_total=usage_totals.get("prompt_tokens"),
+                completion_tokens_total=usage_totals.get("completion_tokens"),
+                total_tokens_total=usage_totals.get("total_tokens"),
+            )
+
         if direct_open_action is not None:
             after_observation: Dict[str, Any] | None = None
             execution_error: str | None = None
@@ -402,6 +431,7 @@ class AndroidActor:
                 messages=[],
                 prompt_text="",
                 raw_response="",
+                usage=None,
                 parse_error=None,
                 execution_error=execution_error,
                 heuristic_stop_triggered=not execution_error,
@@ -414,19 +444,13 @@ class AndroidActor:
             )
             steps.append(step)
             if execution_error:
-                return ActorRunResult(
+                return build_run_result(
                     status="execution_error",
-                    steps=steps,
-                    final_observation=current_observation,
-                    answer_text=answer_text,
                     last_action=direct_open_action.to_payload(),
                 )
-            return ActorRunResult(
+            return build_run_result(
                 status="stopped",
-                steps=steps,
-                final_observation=current_observation,
                 completion_message=completion_message,
-                answer_text=answer_text,
                 last_action=direct_open_action.to_payload(),
             )
 
@@ -444,6 +468,7 @@ class AndroidActor:
                 messages=messages,
                 temperature=self.config.temperature,
             )
+            usage = get_client_usage(self.llm_client)
 
             reason, action_payload = parse_reason_action_output(raw_response)
             original_action = dict(action_payload) if isinstance(action_payload, dict) else None
@@ -461,6 +486,7 @@ class AndroidActor:
                     messages=messages_jsonable,
                     prompt_text=prompt_text,
                     raw_response=raw_response,
+                    usage=usage,
                     parse_error="Failed to parse actor action JSON.",
                     execution_error=None,
                     heuristic_stop_triggered=False,
@@ -478,12 +504,7 @@ class AndroidActor:
                     done_reason="parse_error",
                 )
                 steps.append(step)
-                return ActorRunResult(
-                    status="parse_error",
-                    steps=steps,
-                    final_observation=current_observation,
-                    answer_text=answer_text,
-                )
+                return build_run_result(status="parse_error")
 
             try:
                 action, normalized_action, normalization_applied, normalization_reason, corrected_action, correction_reason = parse_actor_action(
@@ -507,6 +528,7 @@ class AndroidActor:
                     messages=messages_jsonable,
                     prompt_text=prompt_text,
                     raw_response=raw_response,
+                    usage=usage,
                     parse_error=str(exc),
                     execution_error=None,
                     heuristic_stop_triggered=False,
@@ -524,12 +546,7 @@ class AndroidActor:
                     done_reason="parse_error",
                 )
                 steps.append(step)
-                return ActorRunResult(
-                    status="parse_error",
-                    steps=steps,
-                    final_observation=current_observation,
-                    answer_text=answer_text,
-                )
+                return build_run_result(status="parse_error")
 
             done_reason: str | None = None
             after_observation: Dict[str, Any] | None = None
@@ -617,6 +634,7 @@ class AndroidActor:
                 messages=messages_jsonable,
                 prompt_text=prompt_text,
                 raw_response=raw_response,
+                usage=usage,
                 parse_error=None,
                 execution_error=execution_error,
                 heuristic_stop_triggered=heuristic_stop_triggered,
@@ -637,46 +655,31 @@ class AndroidActor:
             )
 
             if done_reason == "completed":
-                return ActorRunResult(
+                return build_run_result(
                     status="completed",
-                    steps=steps,
-                    final_observation=current_observation,
                     completion_message=step_completion_message,
-                    answer_text=answer_text,
                     last_action=action.to_payload(),
                 )
             if done_reason == "heuristic_stop_for_external_verification":
-                return ActorRunResult(
+                return build_run_result(
                     status="stopped",
-                    steps=steps,
-                    final_observation=current_observation,
                     completion_message=heuristic_stop_reason or "",
-                    answer_text=answer_text,
                     last_action=action.to_payload(),
                 )
             if done_reason == "infeasible":
-                return ActorRunResult(
+                return build_run_result(
                     status="infeasible",
-                    steps=steps,
-                    final_observation=current_observation,
                     completion_message=action.message if isinstance(action, StatusAction) else "",
-                    answer_text=answer_text,
                     last_action=action.to_payload(),
                 )
             if done_reason == "execution_error":
-                return ActorRunResult(
+                return build_run_result(
                     status="execution_error",
-                    steps=steps,
-                    final_observation=current_observation,
-                    answer_text=answer_text,
                     last_action=action.to_payload(),
                 )
 
-        return ActorRunResult(
+        return build_run_result(
             status="step_limit",
-            steps=steps,
-            final_observation=current_observation,
-            answer_text=answer_text,
             last_action=steps[-1].action.to_payload() if steps and steps[-1].action else None,
         )
 
@@ -712,6 +715,8 @@ class AndroidActor:
             "- Prefer exact indexed UI actions when the target is visible and actionable.\n"
             "- For click and long_press, prefer a clickable index.\n"
             "- If the target label is visible but no matching clickable index is exposed, use x/y coordinates on the visible target region.\n"
+            "- If the Goal mentions +, add, create, or new, ground to the visible create-entry control, FAB, or button whose label or content description indicates creation.\n"
+            "- Do not infer an index for a + icon from the screenshot if the visible UI table already exposes a create-entry control.\n"
             "- If the target is a visible switch, checkbox, radio button, or icon button and no clickable index is exposed, use a coordinate click on the control itself.\n"
             "- Do not click a known non-clickable label when an actionable parent row, container, or coordinate click is needed.\n"
             "- If a previous action failed or produced no progress, do not repeat it unchanged.\n"
@@ -758,6 +763,8 @@ class AndroidActor:
             "- If the goal says enter/type/fill text into a visible field, use input_text directly.\n"
             "- Do not only click the field unless the goal is only to focus/select the field.\n"
             "- If the name is split across First name and Last name fields, enter the corresponding part into the corresponding field.\n"
+            "- If the Goal mentions +, add, create, or new, ground to the visible create-entry control, FAB, or button whose label or content description indicates creation.\n"
+            "- Do not infer an index for a + icon from the screenshot if the visible UI table already exposes a create-entry control.\n"
             "- If the subtask asks you to fill a coherent form section, fill only the required related fields for that subtask and stop once those fields are complete.\n"
             "- If the current path is not feasible, end explicitly with infeasible.\n"
             "- If the observation is unstable, degraded, or only shows system UI, prefer wait or navigate_back over guessing.\n"
@@ -1562,11 +1569,13 @@ def _extract_target_token(
 ) -> str | None:
     goal_text = _extract_subtask_goal(subtask)
     candidates = _quoted_candidates(goal_text) + _quoted_candidates(reason)
+    combined_text = " ".join(filter(None, [goal_text, reason])).lower()
     for candidate in candidates:
         normalized = _normalize_match_text(candidate)
+        if _is_symbol_only_target(normalized) and _text_implies_create_entry(combined_text):
+            return "create"
         if normalized:
             return normalized
-    combined_text = " ".join(filter(None, [goal_text, reason])).lower()
     for token in (
         "network & internet",
         "wi-fi",
@@ -1578,6 +1587,8 @@ def _extract_target_token(
     ):
         if token in combined_text:
             return _normalize_match_text(token)
+    if _text_implies_create_entry(combined_text):
+        return "create"
     for source_text in (goal_text, reason):
         label = _extract_visible_label_candidate(source_text)
         normalized = _normalize_match_text(label)
@@ -1612,6 +1623,43 @@ def _quoted_candidates(text: str) -> list[str]:
 def _normalize_match_text(text: str) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
     return normalized
+
+
+def _is_symbol_only_target(text: str) -> bool:
+    normalized = _normalize_match_text(text)
+    return bool(normalized) and bool(re.fullmatch(r"[+]+", normalized))
+
+
+def _text_implies_create_entry(text: str) -> bool:
+    normalized = _normalize_match_text(text)
+    if not normalized:
+        return False
+    create_markers = (
+        "create",
+        "add",
+        "new",
+        "new note",
+        "create new",
+        "floating action button",
+        "fab",
+        "file or folder",
+    )
+    return any(marker in normalized for marker in create_markers) or "+" in normalized
+
+
+def _is_create_entry_token(token: str) -> bool:
+    normalized = _normalize_match_text(token)
+    return normalized in {
+        "+",
+        "plus",
+        "add",
+        "create",
+        "new",
+        "new note",
+        "create new",
+        "floating action button",
+        "fab",
+    }
 
 
 def _build_coordinate_fallback_payload(
@@ -1803,14 +1851,26 @@ def _element_matches_token(element: dict[str, Any], token: str) -> bool:
     aliases = {
         "wifi": {"wifi", "wi-fi"},
         "wi-fi": {"wifi", "wi-fi"},
+        "+": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "plus": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "add": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "create": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "new": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "create new": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "new note": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "floating action button": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
+        "fab": {"+", "plus", "add", "create", "new", "create new", "new note", "floating action button", "fab"},
     }
     alias_set = aliases.get(token, {token})
+    create_entry_keywords = ("create", "add", "new", "fab", "new_item")
     for value in fields:
         if not value:
             continue
         if value in alias_set:
             return True
         if any(alias in value or value in alias for alias in alias_set):
+            return True
+        if _is_create_entry_token(token) and any(keyword in value for keyword in create_entry_keywords):
             return True
     return False
 
@@ -1849,6 +1909,9 @@ def _extract_visible_label_candidate(text: str) -> str | None:
         r"\bwi-?fi\b",
         r"\bbluetooth\b",
         r"\bcontacts\b",
+        r"\bcreate\b",
+        r"\badd\b",
+        r"\bnew\b",
     )
     for pattern in label_patterns:
         match = re.search(pattern, normalized_text, flags=re.I)
